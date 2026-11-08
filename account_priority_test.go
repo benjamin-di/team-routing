@@ -59,7 +59,7 @@ func TestPriorityValidationAndPublicCopy(t *testing.T) {
 	if p.AccountPriority["credential-a"] != -5 {
 		t.Fatal("public policy aliases saved map")
 	}
-	for _, raw := range []string{`{"account_priority":null}`, `{"account_priority":{"a":1.5}}`} {
+	for _, raw := range []string{`{"account_priority":null}`, `{"account_priority":{"a":1.5}}`, `{"account_priority":{"a":null,"b":50}}`} {
 		var d dashboardPolicy
 		if json.Unmarshal([]byte(raw), &d) == nil {
 			t.Fatal("accepted invalid priority", raw)

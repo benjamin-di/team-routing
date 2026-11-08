@@ -89,6 +89,17 @@ func (p *dashboardPolicy) UnmarshalJSON(raw []byte) error {
 			return fmt.Errorf("%s must be an object; use {} to remove rules", name)
 		}
 	}
+	if raw, ok := fields["account_priority"]; ok {
+		var priorities map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &priorities); err != nil {
+			return err
+		}
+		for _, priority := range priorities {
+			if bytes.Equal(bytes.TrimSpace(priority), []byte("null")) {
+				return fmt.Errorf("account priority must be an integer")
+			}
+		}
+	}
 	return nil
 }
 
