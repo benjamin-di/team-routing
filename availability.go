@@ -50,6 +50,7 @@ func availabilityPreflight(p policy, req availabilityRequest, now time.Time) map
 	if err != nil {
 		return pass
 	}
+	model = availabilityModel(model, provider, models)
 	inventory := map[string]hostAuthFile{}
 	for _, f := range files {
 		inventory[f.ID] = f
@@ -153,4 +154,23 @@ func availabilityPreflight(p policy, req availabilityRequest, now time.Time) map
 	details := map[string]any{"type": "rate_limit_error", "code": "rate_limit_error", "message": "Usage rate limited. Please try again later.", "retry_after_seconds": retry}
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": details})
 	return map[string]any{"Terminate": true, "StatusCode": 429, "ResponseHeaders": http.Header{"Content-Type": {"application/json"}, "Retry-After": {fmt.Sprint(retry)}}, "ResponseBody": body}
+}
+
+// Match the host's model(value) selection syntax while preserving any exact
+// registered model ID, including a literal parenthesized model name.
+func availabilityModel(model, provider string, inventory []hostCredentialModels) string {
+	for _, entry := range inventory {
+		if provider != "" && entry.Provider != provider {
+			continue
+		}
+		for _, id := range entry.Models {
+			if id == model {
+				return model
+			}
+		}
+	}
+	if i := strings.LastIndex(model, "("); i > 0 && strings.HasSuffix(model, ")") {
+		return model[:i]
+	}
+	return model
 }

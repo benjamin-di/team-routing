@@ -126,3 +126,43 @@ func TestAvailabilityReservesFreshnessDisabledAndCredits(t *testing.T) {
 		t.Fatal("credits supplied eligibility")
 	}
 }
+
+func TestAvailabilityThinkingSuffixUsesExactRegisteredPool(t *testing.T) {
+	now := time.Now()
+	p := defaultPolicy()
+	files := []hostAuthFile{{ID: "held", Provider: "claude"}, {ID: "other", Provider: "claude"}}
+	models := []hostCredentialModels{{ID: "held", Provider: "claude", Models: []string{"claude-sonnet-4-6", "synthetic-alias"}}, {ID: "other", Provider: "claude", Models: []string{"claude-other"}}}
+	inventoryFixture(t, files, models)
+	state.Quota = map[string]snapshot{"held": sample(now, 0, .6, time.Hour), "other": sample(now, .9, .9, time.Hour)}
+	for _, model := range []string{"claude-sonnet-4-6(high)", "synthetic-alias(high)", "claude-sonnet-4-6(8192)", "claude-sonnet-4-6(auto)"} {
+		t.Run(model, func(t *testing.T) {
+			r := availabilityPreflight(p, availabilityRequest{RequestedModel: model}, now)
+			if r["StatusCode"] != 429 || r["ResponseHeaders"].(http.Header).Get("Retry-After") == "" {
+				t.Fatalf("suffix lost capacity response: %v", r)
+			}
+		})
+	}
+	for _, model := range []string{"unknown(high)", "claude-sonnet-4-6(high", "claude-other(high)"} {
+		if r := availabilityPreflight(p, availabilityRequest{RequestedModel: model}, now); len(r) != 0 {
+			t.Fatalf("unrelated pool blocked for %s: %v", model, r)
+		}
+	}
+	state.Quota["held"] = sample(now, .9, .9, time.Hour)
+	if r := availabilityPreflight(p, availabilityRequest{RequestedModel: "synthetic-alias(high)"}, now); len(r) != 0 {
+		t.Fatalf("available pool blocked: %v", r)
+	}
+}
+
+func TestAvailabilityExactParenthesizedModelWins(t *testing.T) {
+	now := time.Now()
+	p := defaultPolicy()
+	inventoryFixture(t, []hostAuthFile{{ID: "base", Provider: "claude"}, {ID: "literal", Provider: "claude"}}, []hostCredentialModels{{ID: "base", Provider: "claude", Models: []string{"model"}}, {ID: "literal", Provider: "claude", Models: []string{"model(high)"}}})
+	state.Quota = map[string]snapshot{"base": sample(now, 0, .5, time.Hour), "literal": sample(now, .9, .9, time.Hour)}
+	if r := availabilityPreflight(p, availabilityRequest{RequestedModel: "model(high)"}, now); len(r) != 0 {
+		t.Fatalf("literal model ignored: %v", r)
+	}
+	state.Quota["base"], state.Quota["literal"] = state.Quota["literal"], state.Quota["base"]
+	if r := availabilityPreflight(p, availabilityRequest{RequestedModel: "model(high)"}, now); r["StatusCode"] != 429 {
+		t.Fatalf("literal model rescued by base model: %v", r)
+	}
+}
