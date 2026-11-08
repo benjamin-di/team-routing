@@ -258,8 +258,10 @@ func rankIncludedAccount(p policy, c candidate, model string, q snapshot, now ti
 			}
 		}
 	}
-	if c.Provider == "claude" && (!hasFive || len(weekly) == 0) {
-		rank.Reason = "Claude account requires complete five-hour and weekly quota"
+	// Some Claude plans report only a weekly window. Require weekly quota and
+	// apply the five-hour window only when the provider reports one.
+	if c.Provider == "claude" && len(weekly) == 0 {
+		rank.Reason = "Claude account requires a weekly quota reading"
 		return rank, false
 	}
 	if !rank.Known {

@@ -132,3 +132,22 @@ func TestWeeklyConversionLearnsAndSurvivesRoundingAndResets(t *testing.T) {
 		t.Fatal("learned ratio not used")
 	}
 }
+func TestClaudeWeeklyOnlyAccountIsEligible(t *testing.T) {
+	now := time.Now()
+	p := defaultPolicy()
+	off := false
+	weeklyOnly := func(week float64) snapshot {
+		return snapshot{At: now, ExtraUsage: &extraUsageStatus{Enabled: &off}, Groups: []group{{Name: "Claude", Buckets: []bucket{{Window: "seven_day", Remaining: week, Reset: now.Add(72 * time.Hour)}}}}}
+	}
+	c := candidate{ID: "weekly-only", Provider: "claude"}
+	if r, ok := rankAccount(p, c, "opus", weeklyOnly(.56), now, 0); !ok {
+		t.Fatal("weekly-only Claude account blocked", r.Reason)
+	}
+	if _, ok := rankAccount(p, c, "opus", weeklyOnly(0), now, 0); ok {
+		t.Fatal("exhausted weekly-only Claude account admitted")
+	}
+	none := snapshot{At: now, ExtraUsage: &extraUsageStatus{Enabled: &off}, Groups: []group{{Name: "Claude", Buckets: []bucket{{Window: "five_hour", Remaining: .9, Reset: now.Add(4 * time.Hour)}}}}}
+	if _, ok := rankAccount(p, c, "opus", none, now, 0); ok {
+		t.Fatal("Claude account without a weekly reading admitted")
+	}
+}
