@@ -54,14 +54,14 @@ func availabilityPreflight(p policy, req availabilityRequest, now time.Time) map
 	if err != nil {
 		return pass
 	}
-	model = availabilityModel(model, provider, models)
+	model, providers := availabilityPool(model, provider, models)
 	inventory := map[string]hostAuthFile{}
 	for _, f := range files {
 		inventory[f.ID] = f
 	}
 	candidates := []candidate{}
 	for _, entry := range models {
-		if provider != "" && entry.Provider != provider {
+		if !providers[entry.Provider] {
 			continue
 		}
 		matches := false
@@ -160,21 +160,43 @@ func availabilityPreflight(p policy, req availabilityRequest, now time.Time) map
 	return map[string]any{"Terminate": true, "StatusCode": 429, "ResponseHeaders": http.Header{"Content-Type": {"application/json"}, "Retry-After": {fmt.Sprint(retry)}}, "ResponseBody": body}
 }
 
-// Match the host's model(value) selection syntax while preserving any exact
-// registered model ID, including a literal parenthesized model name.
-func availabilityModel(model, provider string, inventory []hostCredentialModels) string {
-	for _, entry := range inventory {
-		if provider != "" && entry.Provider != provider {
-			continue
+// Native routing resolves providers by exact registration, then lowercase,
+// checking a suffix-free base before the full literal ID. Credential support
+// is case-insensitive only within that selected provider set.
+func availabilityPool(model, provider string, inventory []hostCredentialModels) (string, map[string]bool) {
+	base := model
+	if i := strings.LastIndex(model, "("); i >= 0 && strings.HasSuffix(model, ")") {
+		if name := strings.TrimSpace(model[:i]); name != "" {
+			base = name
 		}
-		for _, id := range entry.Models {
-			if strings.EqualFold(id, model) {
-				return id
+	}
+	if provider != "" {
+		for _, entry := range inventory {
+			if entry.Provider == provider {
+				for _, id := range entry.Models {
+					if strings.EqualFold(id, base) {
+						return base, map[string]bool{provider: true}
+					}
+				}
+			}
+		}
+		return model, map[string]bool{provider: true}
+	}
+	for _, candidate := range []string{base, model} {
+		for _, lookup := range []string{candidate, strings.ToLower(candidate)} {
+			providers := map[string]bool{}
+			for _, entry := range inventory {
+				for _, id := range entry.Models {
+					if id == lookup {
+						providers[entry.Provider] = true
+						break
+					}
+				}
+			}
+			if len(providers) > 0 {
+				return candidate, providers
 			}
 		}
 	}
-	if i := strings.LastIndex(model, "("); i > 0 && strings.HasSuffix(model, ")") {
-		return model[:i]
-	}
-	return model
+	return model, nil
 }

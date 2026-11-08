@@ -153,17 +153,40 @@ func TestAvailabilityThinkingSuffixUsesExactRegisteredPool(t *testing.T) {
 	}
 }
 
-func TestAvailabilityExactParenthesizedModelWins(t *testing.T) {
+func TestAvailabilityBaseModelPrecedesLiteralSuffix(t *testing.T) {
 	now := time.Now()
 	p := defaultPolicy()
 	inventoryFixture(t, []hostAuthFile{{ID: "base", Provider: "claude"}, {ID: "literal", Provider: "claude"}}, []hostCredentialModels{{ID: "base", Provider: "claude", Models: []string{"model"}}, {ID: "literal", Provider: "claude", Models: []string{"model(high)"}}})
 	state.Quota = map[string]snapshot{"base": sample(now, 0, .5, time.Hour), "literal": sample(now, .9, .9, time.Hour)}
-	if r := availabilityPreflight(p, availabilityRequest{RequestedModel: "model(high)"}, now); len(r) != 0 {
-		t.Fatalf("literal model ignored: %v", r)
+	if r := availabilityPreflight(p, availabilityRequest{RequestedModel: "model(high)"}, now); r["StatusCode"] != 429 {
+		t.Fatalf("literal model rescued native base pool: %v", r)
 	}
 	state.Quota["base"], state.Quota["literal"] = state.Quota["literal"], state.Quota["base"]
-	if r := availabilityPreflight(p, availabilityRequest{RequestedModel: "model(high)"}, now); r["StatusCode"] != 429 {
-		t.Fatalf("literal model rescued by base model: %v", r)
+	if r := availabilityPreflight(p, availabilityRequest{RequestedModel: "model(high)"}, now); len(r) != 0 {
+		t.Fatalf("available native base pool blocked: %v", r)
+	}
+}
+
+func TestAvailabilityRespectsNativeProviderRegistrationPrecedence(t *testing.T) {
+	now := time.Now()
+	p := defaultPolicy()
+	files := []hostAuthFile{{ID: "held", Provider: "claude"}, {ID: "custom", Provider: "custom"}}
+	state.Quota = map[string]snapshot{"held": sample(now, 0, .6, time.Hour)}
+	for _, alias := range []string{"MODEL", "model(high)"} {
+		inventoryFixture(t, files, []hostCredentialModels{{ID: "held", Provider: "claude", Models: []string{"model"}}, {ID: "custom", Provider: "custom", Models: []string{alias}}})
+		for _, model := range []string{"model", "model(high)"} {
+			if r := availabilityPreflight(p, availabilityRequest{Model: model}, now); r["StatusCode"] != 429 {
+				t.Errorf("unselected provider rescued %s with %s: %v", model, alias, r)
+			}
+		}
+	}
+	inventoryFixture(t, files, []hostCredentialModels{{ID: "held", Provider: "claude", Models: []string{"model"}}, {ID: "custom", Provider: "custom", Models: []string{"MODEL"}}})
+	if r := availabilityPreflight(p, availabilityRequest{Model: "MODEL"}, now); len(r) != 0 {
+		t.Fatalf("exact custom provider blocked: %v", r)
+	}
+	inventoryFixture(t, files, []hostCredentialModels{{ID: "custom", Provider: "custom", Models: []string{"model(high)"}}})
+	if r := availabilityPreflight(p, availabilityRequest{Model: "model(high)"}, now); len(r) != 0 {
+		t.Fatalf("literal fallback blocked without a base registration: %v", r)
 	}
 }
 
