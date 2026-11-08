@@ -156,7 +156,9 @@ func dispatch(method string, raw []byte) (any, error) {
 			ConfigYAML []byte `json:"config_yaml"`
 		}
 		_ = json.Unmarshal(raw, &lifecycle)
-		applyConfig(lifecycle.ConfigYAML)
+		if err := applyConfig(lifecycle.ConfigYAML); err != nil {
+			return nil, err
+		}
 		if err := ensurePolicyFile(); err != nil {
 			return nil, err
 		}

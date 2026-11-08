@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // settings holds the plugin's own configuration (plugins.configs.team-routing).
@@ -18,22 +20,20 @@ var settings = struct {
 	ManagementURL string
 }{}
 
-// applyConfig reads the flat keys this plugin understands from its config
-// block. The block is simple key: value YAML, so no YAML dependency is needed.
-func applyConfig(raw []byte) {
-	values := map[string]string{}
-	for _, line := range strings.Split(string(raw), "\n") {
-		name, value, ok := strings.Cut(strings.TrimSpace(line), ":")
-		if !ok || strings.HasPrefix(name, "#") {
-			continue
-		}
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		values[strings.TrimSpace(name)] = value
+// applyConfig decodes the host's YAML config, including JSON and flow mappings.
+func applyConfig(raw []byte) error {
+	var config struct {
+		StateDir      string `yaml:"state_dir"`
+		ManagementURL string `yaml:"management_url"`
+	}
+	if err := yaml.Unmarshal(raw, &config); err != nil {
+		return fmt.Errorf("decode plugin configuration: %w", err)
 	}
 	settings.Lock()
-	settings.StateDir = values["state_dir"]
-	settings.ManagementURL = strings.TrimRight(values["management_url"], "/")
+	settings.StateDir = config.StateDir
+	settings.ManagementURL = strings.TrimRight(config.ManagementURL, "/")
 	settings.Unlock()
+	return nil
 }
 
 // statePath resolves a state file inside state_dir (default: the proxy's
