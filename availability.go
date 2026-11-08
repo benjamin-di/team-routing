@@ -42,6 +42,10 @@ func availabilityPreflight(p policy, req availabilityRequest, now time.Time) map
 	if route, ok, _ := resolveClientRoute(p, digest(key(req.Headers)), model); ok {
 		model = route.Model
 		provider = route.Provider
+	} else if resolved := strings.TrimSpace(req.Model); resolved != "" {
+		// The host has already resolved native selectors such as auto. Keep
+		// the original selector above for client rules, then use its actual pool.
+		model = resolved
 	}
 	if model == "" {
 		return pass
@@ -62,7 +66,7 @@ func availabilityPreflight(p policy, req availabilityRequest, now time.Time) map
 		}
 		matches := false
 		for _, id := range entry.Models {
-			if id == model {
+			if strings.EqualFold(id, model) {
 				matches = true
 				break
 			}
@@ -164,8 +168,8 @@ func availabilityModel(model, provider string, inventory []hostCredentialModels)
 			continue
 		}
 		for _, id := range entry.Models {
-			if id == model {
-				return model
+			if strings.EqualFold(id, model) {
+				return id
 			}
 		}
 	}
