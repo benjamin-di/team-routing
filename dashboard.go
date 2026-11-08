@@ -48,7 +48,7 @@ type dashboardPolicy struct {
 	Owned             []string                            `json:"owned_emails"`
 	Routes            map[string]target                   `json:"routes"`
 	ClientLabels      map[string]string                   `json:"client_labels,omitempty"`
-	AccountPriority   map[string]int                      `json:"account_priority,omitempty"`
+	AccountPriority   accountPriorities                   `json:"account_priority,omitempty"`
 	AccountReserves   map[string]accountReserve           `json:"account_reserves,omitempty"`
 	ModelRoutes       map[string]map[string]modelRule     `json:"model_routes,omitempty"`
 	AccountOwnership  map[string]bool                     `json:"account_ownership,omitempty"`
@@ -84,20 +84,9 @@ func (p *dashboardPolicy) UnmarshalJSON(raw []byte) error {
 	for field := range fields {
 		p.EditedFields[field] = true
 	}
-	for _, name := range []string{"account_priority", "account_reserves", "model_routes", "account_ownership", "provider_reserves", "window_reserves"} {
+	for _, name := range []string{"account_reserves", "model_routes", "account_ownership", "provider_reserves", "window_reserves"} {
 		if raw, ok := fields[name]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return fmt.Errorf("%s must be an object; use {} to remove rules", name)
-		}
-	}
-	if raw, ok := fields["account_priority"]; ok {
-		var priorities map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &priorities); err != nil {
-			return err
-		}
-		for _, priority := range priorities {
-			if bytes.Equal(bytes.TrimSpace(priority), []byte("null")) {
-				return fmt.Errorf("account priority must be an integer")
-			}
 		}
 	}
 	return nil

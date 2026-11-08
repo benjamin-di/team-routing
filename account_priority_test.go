@@ -59,15 +59,45 @@ func TestPriorityValidationAndPublicCopy(t *testing.T) {
 	if p.AccountPriority["credential-a"] != -5 {
 		t.Fatal("public policy aliases saved map")
 	}
-	for _, raw := range []string{`{"account_priority":null}`, `{"account_priority":{"a":1.5}}`, `{"account_priority":{"a":null,"b":50}}`} {
+	for _, raw := range []string{
+		`{"account_priority":null}`,
+		`{"account_priority":{"a":1.5}}`,
+		`{"account_priority":{"a":null,"b":50}}`,
+		`{"ACCOUNT_PRIORITY":{"a":null,"b":50}}`,
+		`{"Account_Priority":{"a":null,"b":50}}`,
+		`{"ACCOUNT_PRIORITY":null}`,
+		`{"account_priority":{"a":null},"account_priority":{"b":50}}`,
+		`{"account_priority":{"a":100},"ACCOUNT_PRIORITY":{"a":null}}`,
+		`{"account_priority":{"a":null,"a":100}}`,
+	} {
 		var d dashboardPolicy
 		if json.Unmarshal([]byte(raw), &d) == nil {
-			t.Fatal("accepted invalid priority", raw)
+			t.Error("accepted invalid priority", raw)
+		}
+		var saved policy
+		if json.Unmarshal([]byte(raw), &saved) == nil {
+			t.Error("accepted invalid persisted priority", raw)
 		}
 	}
 	for id, value := range map[string]int{" spaced": 0, "valid": maximumAccountPriority + 1} {
 		if validateAccountPriority(map[string]int{id: value}) == nil {
 			t.Fatal("invalid priority accepted", id, value)
+		}
+	}
+}
+
+func TestPriorityDecoderPreservesIntegerAndMapSemantics(t *testing.T) {
+	for _, raw := range []string{
+		`{"account_priority":{"a":0,"b":-5}}`,
+		`{"ACCOUNT_PRIORITY":{"a":0,"b":-5}}`,
+		`{"account_priority":{"a":0},"account_priority":{"b":-5}}`,
+	} {
+		var input dashboardPolicy
+		if err := json.Unmarshal([]byte(raw), &input); err != nil {
+			t.Fatal(err)
+		}
+		if len(input.AccountPriority) != 2 || input.AccountPriority["a"] != 0 || input.AccountPriority["b"] != -5 {
+			t.Fatal("integer priorities changed", raw, input.AccountPriority)
 		}
 	}
 }
