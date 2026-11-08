@@ -122,6 +122,7 @@ func policySchema() map[string]any {
 	}
 	props["routes"] = map[string]any{"type": "object", "maxProperties": 200, "additionalProperties": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"provider", "model"}, "properties": map[string]any{"provider": map[string]any{"type": "string", "minLength": 1}, "model": map[string]any{"type": "string", "minLength": 1}}}}
 	props["client_labels"] = map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string", "maxLength": 80}}
+	props["account_priority"] = map[string]any{"type": "object", "maxProperties": 500, "propertyNames": map[string]any{"minLength": 1, "maxLength": 512}, "additionalProperties": accountPriorityField()}
 	props["account_reserves"] = accountReserveSchema()
 	props["model_routes"] = modelRulesSchema()
 	props["account_ownership"] = map[string]any{"type": "object", "maxProperties": 500, "additionalProperties": map[string]any{"type": "boolean"}}
@@ -183,6 +184,9 @@ func validatePolicy(p policy) error {
 		if err != nil || address.Address != email || len(email) > 254 {
 			return fmt.Errorf("enter plain owned-account email addresses")
 		}
+	}
+	if err := validateAccountPriority(p.AccountPriority); err != nil {
+		return err
 	}
 	if err := validateAccountReserves(p.AccountReserves); err != nil {
 		return err

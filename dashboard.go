@@ -48,6 +48,7 @@ type dashboardPolicy struct {
 	Owned             []string                            `json:"owned_emails"`
 	Routes            map[string]target                   `json:"routes"`
 	ClientLabels      map[string]string                   `json:"client_labels,omitempty"`
+	AccountPriority   map[string]int                      `json:"account_priority,omitempty"`
 	AccountReserves   map[string]accountReserve           `json:"account_reserves,omitempty"`
 	ModelRoutes       map[string]map[string]modelRule     `json:"model_routes,omitempty"`
 	AccountOwnership  map[string]bool                     `json:"account_ownership,omitempty"`
@@ -83,7 +84,7 @@ func (p *dashboardPolicy) UnmarshalJSON(raw []byte) error {
 	for field := range fields {
 		p.EditedFields[field] = true
 	}
-	for _, name := range []string{"account_reserves", "model_routes", "account_ownership", "provider_reserves", "window_reserves"} {
+	for _, name := range []string{"account_priority", "account_reserves", "model_routes", "account_ownership", "provider_reserves", "window_reserves"} {
 		if raw, ok := fields[name]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return fmt.Errorf("%s must be an object; use {} to remove rules", name)
 		}
@@ -208,6 +209,7 @@ func publicPolicy(p policy, s localSecrets) dashboardPolicy {
 	out.RecordRouting = p.RecordRouting
 	out.WeeklyRatio = p.WeeklyRatio
 	out.RequireCreditsOff = p.RequireCreditsOff
+	out.AccountPriority = cloneAccountPriority(p.AccountPriority)
 	out.AccountReserves = cloneAccountReserves(p.AccountReserves)
 	out.AccountOwnership = cloneOwnership(p.AccountOwnership)
 	out.ProviderReserves = cloneProviderReserves(p.ProviderReserves)
@@ -531,6 +533,10 @@ func saveDashboard(input dashboardPolicy, callers ...managementCaller) (dashboar
 	if input.WindowReserves == nil && !input.EditedFields["window_reserves"] {
 		next.WindowReserves = cloneWindowReserves(current.WindowReserves)
 	}
+	next.AccountPriority = input.AccountPriority
+	if input.AccountPriority == nil && !input.EditedFields["account_priority"] {
+		next.AccountPriority = cloneAccountPriority(current.AccountPriority)
+	}
 	next.AccountReserves = input.AccountReserves
 	if input.AccountReserves == nil && !input.EditedFields["account_reserves"] {
 		next.AccountReserves = cloneAccountReserves(current.AccountReserves)
@@ -609,7 +615,7 @@ func handleDashboard(req dashboardRequest) dashboardResponse {
 	caller := callerFromRequest(req.Headers)
 	switch req.Method + " " + req.Path {
 	case "GET " + dashboardAPI + "/schema":
-		return dashboardJSON(200, map[string]any{"version": pluginVersion, "schema": policySchema(), "fields": policyFields(), "groups": policyGroups(), "engine": engineProfile(), "provider_fields": providerFields(), "window_fields": windowReserveFields(), "provider_default": defaultSharedPolicy(), "routing_precedence": []string{"Exact requested-model rule", "Client default", "Requested model"}, "account_reserves": map[string]any{"title": "Accounts and reserves", "description": "Ownership works for every connected provider. Defaults and schedules are provider-specific. Reserve controls require reported quota; unknown limits remain provider-managed. Explicit account percentages override owned exemptions. Credential IDs keep rules attached across token refreshes.", "fields": accountReserveFields()}, "ui": map[string]any{"refresh_seconds": 15}})
+		return dashboardJSON(200, map[string]any{"version": pluginVersion, "schema": policySchema(), "fields": policyFields(), "groups": policyGroups(), "engine": engineProfile(), "provider_fields": providerFields(), "window_fields": windowReserveFields(), "provider_default": defaultSharedPolicy(), "routing_precedence": []string{"Exact requested-model rule", "Client default", "Requested model"}, "account_priority_field": accountPriorityField(), "account_reserves": map[string]any{"title": "Accounts and reserves", "description": "Ownership works for every connected provider. Defaults and schedules are provider-specific. Reserve controls require reported quota; unknown limits remain provider-managed. Explicit account percentages override owned exemptions. Credential IDs keep rules attached across token refreshes.", "fields": accountReserveFields()}, "ui": map[string]any{"refresh_seconds": 15}})
 	case "POST " + dashboardAPI + "/evaluate":
 		if len(req.Body) > 4096 {
 			return dashboardJSON(413, map[string]string{"error": "Evaluation request is too large."})

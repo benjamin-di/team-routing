@@ -211,6 +211,12 @@ func providerFields() []policyField {
 
 func validateNewSubscriptionEntries(next, current policy) error {
 	ids, oldIDs := map[string]accountReserve{}, map[string]accountReserve{}
+	for id := range next.AccountPriority {
+		ids[id] = accountReserve{}
+	}
+	for id := range current.AccountPriority {
+		oldIDs[id] = accountReserve{}
+	}
 	for id := range next.AccountOwnership {
 		ids[id] = accountReserve{}
 	}

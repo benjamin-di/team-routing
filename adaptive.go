@@ -155,6 +155,7 @@ func activeCounts(now time.Time) map[string]int {
 }
 
 type adaptiveRank struct {
+	Priority                                                            int
 	ActiveRequests                                                      int
 	ID                                                                  string
 	Score, Remaining                                                    float64
@@ -219,6 +220,7 @@ func adaptiveChoose(p policy, provider, model string, h http.Header, meta map[st
 		q := state.Quota[c.ID]
 		q.DemandRate = demand
 		r, ok := rankAccount(p, c, model, q, now, counts[c.ID])
+		r.Priority = p.AccountPriority[c.ID]
 		r.ActiveRequests = counts[c.ID]
 		diagnostics = append(diagnostics, rankEvidence{adaptiveRank: r, Eligible: ok})
 		if ok {
@@ -230,6 +232,9 @@ func adaptiveChoose(p policy, provider, model string, h http.Header, meta map[st
 		return map[string]any{"Handled": true, "Reject": true, "RejectCode": "rate_limit_error", "RejectReason": "Usage rate limited. Please try again later."}
 	}
 	sort.SliceStable(ranks, func(i, j int) bool {
+		if ranks[i].Priority != ranks[j].Priority {
+			return ranks[i].Priority > ranks[j].Priority
+		}
 		if math.Abs(ranks[i].Score-ranks[j].Score) > 1e-9 {
 			return ranks[i].Score > ranks[j].Score
 		}
@@ -238,6 +243,13 @@ func adaptiveChoose(p policy, provider, model string, h http.Header, meta map[st
 		}
 		return ranks[i].ID < ranks[j].ID
 	})
+	// All later affinity, deadline and spreading decisions stay in this eligible tier.
+	for i := 1; i < len(ranks); i++ {
+		if ranks[i].Priority != ranks[0].Priority {
+			ranks = ranks[:i]
+			break
+		}
+	}
 	pk := affinityKey(h, meta, provider, model)
 	// Schedule parallel work across eligible accounts before concentrating it
 	// on one deadline score. No artificial concurrency quota or wait loop is added.

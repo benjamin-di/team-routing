@@ -21,6 +21,7 @@ type policy struct {
 	Owned            []string                            `json:"owned_emails"`
 	Routes           map[string]target                   `json:"routes"`
 	ClientLabels     map[string]string                   `json:"client_labels,omitempty"`
+	AccountPriority  map[string]int                      `json:"account_priority,omitempty"`
 	AccountReserves  map[string]accountReserve           `json:"account_reserves,omitempty"`
 	ModelRoutes      map[string]map[string]modelRule     `json:"model_routes,omitempty"`
 	AccountOwnership map[string]bool                     `json:"account_ownership,omitempty"`
