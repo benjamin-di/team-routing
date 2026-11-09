@@ -40,7 +40,7 @@
     const key = $('management-key').value.trim(); if (!key) throw Error('Enter the management key.');
     const response = await fetch(apiBase + '/' + path, {
       method, headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', 'X-Team-Routing-Origin': location.origin },
-      body: body === undefined ? undefined : JSON.stringify(body), credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(20000)
+      body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(20000)
     });
     let value; try { value = await response.json(); } catch { throw Error('The proxy returned an unexpected response.'); }
     if (!response.ok) throw Error(value.error || 'Request failed (' + response.status + ').');

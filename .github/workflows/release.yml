@@ -30,6 +30,7 @@ jobs:
           go test -tags abiprobe -count=1 ./...
           node --check dashboard.js
           node --check editors.js
+          node --test dashboard_session_test.js
 
   windows-linux:
     needs: validation

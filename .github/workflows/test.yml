@@ -26,3 +26,4 @@ jobs:
         run: |
           node --check dashboard.js
           node --check editors.js
+          node --test dashboard_session_test.js
