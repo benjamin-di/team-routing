@@ -319,6 +319,31 @@ func retryAfter(h http.Header, now time.Time) time.Duration {
 	return 0
 }
 
+func googleQuotaRetry(body string) time.Duration {
+	var envelope struct {
+		Error struct {
+			Details []json.RawMessage `json:"details"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(body), &envelope) != nil {
+		return 0
+	}
+	var retry time.Duration
+	for _, raw := range envelope.Error.Details {
+		var detail struct {
+			Type  string `json:"@type"`
+			Delay string `json:"retryDelay"`
+		}
+		if json.Unmarshal(raw, &detail) != nil || detail.Type != "type.googleapis.com/google.rpc.RetryInfo" {
+			continue
+		}
+		if delay, err := time.ParseDuration(detail.Delay); err == nil && delay > retry {
+			retry = delay
+		}
+	}
+	return retry
+}
+
 type quotaTransport func(quotaAccount, string, string, map[string]string, string) (quotaHTTP, error)
 
 func fetchProviderQuota(a quotaAccount, send quotaTransport) (snapshot, error) {
@@ -359,7 +384,11 @@ func fetchProviderQuota(a quotaAccount, send quotaTransport) (snapshot, error) {
 	}
 	if response.Code < 200 || response.Code >= 300 {
 		recordQuotaDiagnostic(a, response, nil, started)
-		return snapshot{}, &quotaProblem{response.Code, retryAfter(response.Header, time.Now())}
+		retry := retryAfter(response.Header, time.Now())
+		if a.Provider == "antigravity" {
+			retry = max(retry, googleQuotaRetry(response.Body))
+		}
+		return snapshot{}, &quotaProblem{response.Code, retry}
 	}
 	q, parseErr := parseProviderQuota(a.Provider, []byte(response.Body), time.Now())
 	recordQuotaDiagnostic(a, response, parseErr, started)

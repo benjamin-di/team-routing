@@ -118,6 +118,44 @@ func TestRepeatedQuotaRateLimitsIncreaseDelay(t *testing.T) {
 	}
 }
 
+func TestQuotaRetryHonorsGoogleRetryInfo(t *testing.T) {
+	for _, test := range []struct {
+		name, header, details string
+		delay                 time.Duration
+	}{
+		{"fractional", "", `{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"128.5s"}`, 128500 * time.Millisecond},
+		{"longer header", "180", `{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"128.5s"}`, 3 * time.Minute},
+		{"longer body", "45", `{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"128.5s"}`, 128500 * time.Millisecond},
+		{"beyond cap", "", `{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"10800s"}`, 3 * time.Hour},
+		{"multiple", "", `{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"180s"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"128.5s"}`, 3 * time.Minute},
+		{"invalid details", "", `null,{}, {"@type":"other","retryDelay":"180s"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"-180s"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"invalid"}`, 30 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			now := time.Now()
+			cache := &quotaCache{Entries: map[string]*quotaEntry{}, Now: func() time.Time { return now }}
+			calls := 0
+			fetch := func() (snapshot, error) {
+				return fetchProviderQuota(quotaAccount{Provider: "antigravity", Metadata: map[string]any{"project_id": "synthetic-project"}}, func(quotaAccount, string, string, map[string]string, string) (quotaHTTP, error) {
+					calls++
+					return quotaHTTP{Code: 429, Header: http.Header{"Retry-After": []string{test.header}}, Body: `{"error":{"details":[` + test.details + `]}}`}, nil
+				})
+			}
+			cache.get("limited", time.Minute, fetch)
+			now = now.Add(test.delay - time.Nanosecond)
+			cache.get("limited", time.Minute, fetch)
+			if calls != 1 {
+				t.Fatal("quota retried before the provider cooldown expired", calls)
+			}
+			now = now.Add(time.Nanosecond)
+			cache.get("limited", time.Minute, fetch)
+			if calls != 2 {
+				t.Fatal("quota did not retry when the cooldown expired", calls)
+			}
+		})
+	}
+}
+
 func TestQuotaCacheTTLAndBackoff(t *testing.T) {
 	now := time.Now()
 	q := &quotaCache{Entries: map[string]*quotaEntry{}, Path: filepath.Join(t.TempDir(), "cache.json"), Now: func() time.Time { return now }}
