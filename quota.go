@@ -90,7 +90,7 @@ func (q *quotaCache) get(identity string, ttl time.Duration, fetch func() (snaps
 		}
 		now := q.Now()
 		entry.Checked = now
-		if now.Before(entry.Next) || (!entry.Quota.At.IsZero() && now.Sub(entry.Quota.At) < ttl && !exhaustedResetPassed(entry.Quota, now)) {
+		if now.Before(entry.nextRead(ttl, now)) {
 			q.Hits++
 			cached, message := entry.Quota, entry.Message
 			q.Unlock()
@@ -191,6 +191,24 @@ func exhaustedResetPassed(q snapshot, now time.Time) bool {
 	return false
 }
 
+func (entry *quotaEntry) nextRead(ttl time.Duration, now time.Time) time.Time {
+	due := entry.Next
+	if !entry.Quota.At.IsZero() && !exhaustedResetPassed(entry.Quota, now) {
+		freshUntil := entry.Quota.At.Add(ttl)
+		for _, g := range entry.Quota.Groups {
+			for _, b := range g.Buckets {
+				if b.Window != "extra_usage" && b.Remaining <= 0 && b.Reset.After(now) && b.Reset.Add(time.Second).Before(freshUntil) {
+					freshUntil = b.Reset.Add(time.Second)
+				}
+			}
+		}
+		if freshUntil.After(due) {
+			due = freshUntil
+		}
+	}
+	return due
+}
+
 // Sleep until the next cached due time, rather than adding a full polling
 // interval after a sequential scan. This preserves backoff and wakes promptly
 // after a confirmed exhausted window resets.
@@ -203,13 +221,7 @@ func (q *quotaCache) nextPoll(poll int, scanStarted time.Time) time.Duration {
 		if entry.Next.IsZero() || entry.Checked.Before(scanStarted) {
 			continue
 		}
-		due := entry.Next
-		if !entry.Quota.At.IsZero() && !exhaustedResetPassed(entry.Quota, now) {
-			if freshUntil := entry.Quota.At.Add(time.Duration(poll) * time.Second); freshUntil.After(due) {
-				due = freshUntil
-			}
-		}
-		until := due.Sub(now)
+		until := entry.nextRead(time.Duration(poll)*time.Second, now).Sub(now)
 		if until < delay {
 			delay = until
 		}

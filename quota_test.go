@@ -182,6 +182,37 @@ func TestQuotaPollDoesNotDelayOverdueRetryAfterSlowScan(t *testing.T) {
 	}
 }
 
+func TestQuotaPollPreservesExhaustedResetAcrossRestart(t *testing.T) {
+	now := time.Now()
+	start := now
+	cache := &quotaCache{Entries: map[string]*quotaEntry{}, Path: filepath.Join(t.TempDir(), "cache.json"), Now: func() time.Time { return now }}
+	calls := 0
+	fetch := func() (snapshot, error) {
+		calls++
+		return snapshot{Groups: []group{{Name: "Claude", Buckets: []bucket{{Window: "five_hour", Remaining: 0, Reset: start.Add(time.Minute)}}}}}, nil
+	}
+	cache.get("exhausted", 5*time.Minute, fetch)
+	if delay := cache.nextPoll(300, start); delay != 61*time.Second {
+		t.Fatal("poll ignored the known exhausted reset", delay)
+	}
+	now = start.Add(30 * time.Second)
+	cache = &quotaCache{Entries: map[string]*quotaEntry{}, Path: cache.Path, Now: func() time.Time { return now }}
+	cache.get("exhausted", 5*time.Minute, fetch)
+	if delay := cache.nextPoll(300, now); delay != 31*time.Second {
+		t.Fatal("restart lost the exhausted reset wakeup", delay)
+	}
+	now = start.Add(time.Minute)
+	cache.get("exhausted", 5*time.Minute, fetch)
+	if calls != 1 {
+		t.Fatal("reset refreshed before its deadline", calls)
+	}
+	now = start.Add(61 * time.Second)
+	cache.get("exhausted", 5*time.Minute, fetch)
+	if calls != 2 {
+		t.Fatal("reset did not refresh when due", calls)
+	}
+}
+
 func TestQuotaCacheTTLAndBackoff(t *testing.T) {
 	now := time.Now()
 	q := &quotaCache{Entries: map[string]*quotaEntry{}, Path: filepath.Join(t.TempDir(), "cache.json"), Now: func() time.Time { return now }}
