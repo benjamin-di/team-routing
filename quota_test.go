@@ -156,6 +156,32 @@ func TestQuotaRetryHonorsGoogleRetryInfo(t *testing.T) {
 	}
 }
 
+func TestQuotaPollDoesNotDelayOverdueRetryAfterSlowScan(t *testing.T) {
+	now := time.Now()
+	cache := &quotaCache{Entries: map[string]*quotaEntry{}, Now: func() time.Time { return now }}
+	scanStarted := now
+	cache.get("active", time.Minute, func() (snapshot, error) {
+		return snapshot{}, &quotaProblem{Code: 429}
+	})
+	// Other accounts can keep the scan busy beyond the 30-second retry.
+	now = now.Add(40 * time.Second)
+	if delay := cache.nextPoll(60, scanStarted); delay != 0 {
+		t.Fatal("overdue retry must run immediately after the scan", delay)
+	}
+	// Entries not visited by the current scan must not cause a busy loop.
+	if delay := cache.nextPoll(60, now); delay != time.Minute {
+		t.Fatal("inactive cached account changed the polling schedule", delay)
+	}
+	// Increasing the polling interval keeps a successful reading fresh longer
+	// than its old Next value; do not repeatedly wake on that obsolete value.
+	cache.Entries["active"].Quota = fixtureQuota()
+	cache.Entries["active"].Quota.At = scanStarted
+	cache.Entries["active"].Checked = now
+	if delay := cache.nextPoll(60, now); delay != 20*time.Second {
+		t.Fatal("fresh quota caused an unnecessary refresh", delay)
+	}
+}
+
 func TestQuotaCacheTTLAndBackoff(t *testing.T) {
 	now := time.Now()
 	q := &quotaCache{Entries: map[string]*quotaEntry{}, Path: filepath.Join(t.TempDir(), "cache.json"), Now: func() time.Time { return now }}

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Retry transient quota-read rate limits after 30 seconds instead of imposing a 15-minute minimum admission outage. Repeated failures still back off exponentially up to two hours, longer provider retry delays (including Antigravity `google.rpc.RetryInfo`) remain authoritative, and stale quota/billing observations remain blocked.
+- Retry transient quota-read rate limits after 30 seconds instead of imposing a 15-minute minimum admission outage. Repeated failures still back off exponentially up to two hours, longer provider retry delays (including Antigravity `google.rpc.RetryInfo`) remain authoritative, and stale quota/billing observations remain blocked. Avoid adding a minimum worker sleep after a slow scan leaves a retry overdue.
 
 ## 1.8.2
 

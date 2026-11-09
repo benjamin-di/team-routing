@@ -35,6 +35,7 @@ func (q *quotaProblem) Error() string { return fmt.Sprintf("quota request failed
 type quotaEntry struct {
 	Quota    snapshot
 	Next     time.Time
+	Checked  time.Time `json:"-"`
 	Failures int
 	Message  string
 	Busy     chan struct{} `json:"-"`
@@ -88,6 +89,7 @@ func (q *quotaCache) get(identity string, ttl time.Duration, fetch func() (snaps
 			q.Entries[identity] = entry
 		}
 		now := q.Now()
+		entry.Checked = now
 		if now.Before(entry.Next) || (!entry.Quota.At.IsZero() && now.Sub(entry.Quota.At) < ttl && !exhaustedResetPassed(entry.Quota, now)) {
 			q.Hits++
 			cached, message := entry.Quota, entry.Message
@@ -192,24 +194,27 @@ func exhaustedResetPassed(q snapshot, now time.Time) bool {
 // Sleep until the next cached due time, rather than adding a full polling
 // interval after a sequential scan. This preserves backoff and wakes promptly
 // after a confirmed exhausted window resets.
-func nextQuotaPoll(poll int) time.Duration {
+func (q *quotaCache) nextPoll(poll int, scanStarted time.Time) time.Duration {
 	delay := time.Duration(poll) * time.Second
-	monitor.Lock()
-	defer monitor.Unlock()
-	now := monitor.Now()
-	for _, entry := range monitor.Entries {
-		if entry.Next.IsZero() {
+	q.Lock()
+	defer q.Unlock()
+	now := q.Now()
+	for _, entry := range q.Entries {
+		if entry.Next.IsZero() || entry.Checked.Before(scanStarted) {
 			continue
 		}
-		until := entry.Next.Sub(now)
+		due := entry.Next
+		if !entry.Quota.At.IsZero() && !exhaustedResetPassed(entry.Quota, now) {
+			if freshUntil := entry.Quota.At.Add(time.Duration(poll) * time.Second); freshUntil.After(due) {
+				due = freshUntil
+			}
+		}
+		until := due.Sub(now)
 		if until < delay {
 			delay = until
 		}
 	}
-	if delay < 15*time.Second {
-		delay = 15 * time.Second
-	}
-	return delay
+	return max(0, delay)
 }
 func accountIdentity(a quotaAccount) string {
 	email, _ := a.Metadata["email"].(string)
