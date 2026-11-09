@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Retry transient quota-read rate limits after 30 seconds instead of imposing a 15-minute minimum admission outage. Repeated failures still back off exponentially up to two hours, longer provider retry delays remain authoritative, and stale quota/billing observations remain blocked.
+
 ## 1.8.2
 
 - Capture correlated request summaries, credential selections, every delivered upstream usage/failure callback, final outcomes and quota-read failures in a bounded private diagnostic journal. Preserve requested/effective models, timing, token/cache counts, structured provider quota reasons and retry hints without raw prompts, tools, credentials or error bodies.

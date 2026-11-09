@@ -135,7 +135,9 @@ func (q *quotaCache) get(identity string, ttl time.Duration, fetch func() (snaps
 			entry.Message = "Quota temporarily unavailable; cached readings retained."
 			if p, ok := err.(*quotaProblem); ok {
 				if p.Code == 429 {
-					delay = time.Duration(math.Min(7200, 900*math.Pow(2, float64(min(entry.Failures-1, 4))))) * time.Second
+					// A transient rate limit should retry within the quota freshness
+					// grace, rather than imposing a 15-minute admission outage.
+					delay = time.Duration(math.Min(7200, 30*math.Pow(2, float64(min(entry.Failures-1, 8))))) * time.Second
 					entry.Message = "Provider rate limited quota reads; refresh is paused."
 				} else if p.Code == 401 || p.Code == 403 {
 					delay = 15 * time.Minute
