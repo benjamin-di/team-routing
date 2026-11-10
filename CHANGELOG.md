@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Retry transient quota-read rate limits after 30 seconds instead of imposing a 15-minute minimum admission outage. Repeated failures still back off exponentially up to two hours, longer provider retry delays (including Antigravity `google.rpc.RetryInfo`) remain authoritative, and stale quota/billing observations remain blocked. Avoid adding a minimum worker sleep after a slow scan leaves a retry overdue, while retaining known exhausted-window reset wakeups across restarts.
+- Count Claude response quota headers as a fresh reading when they cover every reported included window, while preserving cached allowance limits and reserves. Persist overage status so rejected overage can refresh disabled billing and newer available overage excludes strict-mode accounts.
 
 ## 1.8.2
 

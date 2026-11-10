@@ -205,7 +205,7 @@ func adaptiveChoose(p policy, provider, model string, h http.Header, meta map[st
 	demand := 0.0
 	for _, c := range candidates {
 		q := state.Quota[c.ID]
-		if now.Sub(q.At) > time.Duration(p.Poll+quotaAgeGraceSeconds)*time.Second {
+		if now.Sub(quotaObservationTime(c, model, q, now)) > time.Duration(p.Poll+quotaAgeGraceSeconds)*time.Second {
 			continue
 		}
 		for _, g := range q.Groups {

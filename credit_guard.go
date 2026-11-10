@@ -52,7 +52,7 @@ func creditSafetyReason(p policy, c candidate, q snapshot, now time.Time) string
 	if c.Provider != "claude" {
 		return ""
 	}
-	billingReason := creditBillingReason(p, q, now)
+	billingReason := creditBillingReason(p, c, q, now)
 	creditFences.Lock()
 	loadCreditFences()
 	if creditFences.Broken {
@@ -88,20 +88,38 @@ func creditSafetyReason(p policy, c candidate, q snapshot, now time.Time) string
 	return "Paid usage was detected; waiting for usable included quota in a newer window"
 }
 
-func creditBillingReason(p policy, q snapshot, now time.Time) string {
-	if q.At.IsZero() || now.Sub(q.At) > time.Duration(p.Poll+quotaAgeGraceSeconds)*time.Second || q.At.After(now.Add(quotaResetJitterSeconds*time.Second)) {
+func creditBillingReason(p policy, c candidate, q snapshot, now time.Time) string {
+	maxAge := time.Duration(p.Poll+quotaAgeGraceSeconds) * time.Second
+	if q.At.IsZero() || q.At.After(now.Add(quotaResetJitterSeconds*time.Second)) {
 		return "A recent included quota and billing reading is required"
 	}
+	quotaFresh := now.Sub(quotaObservationTime(c, "", q, now)) <= maxAge
 	// Best-effort subscription mode relaxes only the provider billing toggle.
 	// Explicit paid requests and paid-use fences remain enforced.
 	if !p.RequireCreditsOff {
+		if !quotaFresh {
+			return "A recent included quota and billing reading is required"
+		}
 		return ""
+	}
+	admission.Lock()
+	loadAdmission()
+	billing := admission.Data.Billing[c.ID]
+	admission.Unlock()
+	if billing.At.After(q.At) && billing.Status != "rejected" {
+		return "Extra usage is available at the provider; account is excluded"
+	}
+	if !quotaFresh {
+		return "A recent included quota and billing reading is required"
 	}
 	if q.ExtraUsage == nil || q.ExtraUsage.Enabled == nil {
 		return "Extra usage setting is unknown; account is excluded"
 	}
 	if *q.ExtraUsage.Enabled {
 		return "Extra usage is enabled at the provider; account is excluded"
+	}
+	if now.Sub(q.At) > maxAge && (billing.Status != "rejected" || now.Sub(billing.At) > maxAge) {
+		return "A recent included quota and billing reading is required"
 	}
 	return ""
 }
