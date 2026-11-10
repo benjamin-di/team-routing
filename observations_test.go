@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
@@ -231,7 +232,7 @@ func TestBillingHeaderPersistenceAndOrdering(t *testing.T) {
 			admission.Path = ""
 			admission.Unlock()
 		}
-		if reason := creditSafetyReason(p, c, q, now); reason != want {
+		if reason := creditSafetyReason(p, c, "", q, now); reason != want {
 			t.Fatal("billing ordering or reload lost newer observation", reload, reason)
 		}
 	}
@@ -239,8 +240,12 @@ func TestBillingHeaderPersistenceAndOrdering(t *testing.T) {
 	admission.Lock()
 	admission.Path = ""
 	admission.Unlock()
-	if reason := creditSafetyReason(p, c, q, now); reason != "" {
-		t.Fatal("newer rejected observation did not survive reload", reason)
+	if reason := creditSafetyReason(p, c, "", q, now); reason != want {
+		t.Fatal("later rejected observation hid available overage after reload", reason)
+	}
+	q.At = at.Add(1500 * time.Millisecond) // A newer endpoint reading reports disabled.
+	if reason := creditSafetyReason(p, c, "", q, now); reason != "" {
+		t.Fatal("newer endpoint and rejected observations did not survive reload", reason)
 	}
 }
 
@@ -257,7 +262,7 @@ func TestBillingHeaderTimestampValidation(t *testing.T) {
 				want = "Extra usage is available at the provider; account is excluded"
 			}
 			recordAdmissionSignals(c.ID, http.Header{"Anthropic-Ratelimit-Unified-Overage-Status": {"allowed"}}, at, now)
-			if reason := creditSafetyReason(p, c, q, now); reason != want {
+			if reason := creditSafetyReason(p, c, "", q, now); reason != want {
 				t.Fatal("invalid request-start timestamp changed billing", reason)
 			}
 		})
@@ -302,5 +307,174 @@ func TestAdaptiveDemandIncludesHeaderObservations(t *testing.T) {
 	want, _ := rankAccount(p, c, "opus", q, now, 0)
 	if math.Abs(actual.Score-want.Score) > 1e-9 || actual.Opportunities != want.Opportunities {
 		t.Fatal("demand aggregation ignored fresh header account", actual, want)
+	}
+}
+
+func TestClaudeHeadersDoNotRefreshUncoveredModelWindowForOwnedAccount(t *testing.T) {
+	for _, strict := range []bool{true, false} {
+		t.Run(map[bool]string{true: "strict", false: "best_effort"}[strict], func(t *testing.T) {
+			p, c, q, at, now := observationFixture(t)
+			p.RequireCreditsOff = strict
+			p.AccountOwnership = map[string]bool{c.ID: true}
+			q.Groups[0].Buckets = append(q.Groups[0].Buckets, bucket{
+				Window: "seven_day_opus", Remaining: .8, Reset: q.Groups[0].Buckets[1].Reset,
+			})
+			_, before := rankAccount(p, c, "opus", q, now, 0)
+			recordAdmissionSignals(c.ID, observationHeaders(q), at, now)
+			rank, after := rankAccount(p, c, "opus", q, now, 0)
+			t.Logf("endpoint_age=%.0fs limit=%ds model_observation_age=%.0fs before_headers=%v after_headers=%v reason=%q",
+				now.Sub(q.At).Seconds(), p.Poll+quotaAgeGraceSeconds,
+				now.Sub(quotaObservationTime(c, "opus", q, now)).Seconds(), before, after, rank.Reason)
+			if after {
+				t.Error("want eligible=false: headers do not cover the stale seven_day_opus bucket")
+			}
+		})
+	}
+}
+
+func TestClaudeLateEqualHeadersKeepNewerObservation(t *testing.T) {
+	p, c, q, at, now := observationFixture(t)
+	h := observationHeaders(q)
+	recordAdmissionSignals(c.ID, h, at, now)
+	_, before := rankAccount(p, c, "opus", q, now, 0)
+	beforeAge := now.Sub(quotaObservationTime(c, "opus", q, now)).Seconds()
+	// A slower concurrent request started three minutes earlier and reports
+	// identical rounded utilization and reset boundaries when it completes.
+	recordAdmissionSignals(c.ID, h, at.Add(-3*time.Minute), now)
+	rank, after := rankAccount(p, c, "opus", q, now, 0)
+	t.Logf("before_eligible=%v before_age=%.0fs after_eligible=%v after_age=%.0fs reason=%q",
+		before, beforeAge, after, now.Sub(quotaObservationTime(c, "opus", q, now)).Seconds(), rank.Reason)
+	if !after {
+		t.Error("want eligible=true and observation_age=30s: newer complete header observations remain valid")
+	}
+}
+
+func TestBestEffortBufferUsesNewerOverageStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status   string
+		eligible bool
+	}{{"rejected", true}, {"allowed", false}} {
+		t.Run(tc.status, func(t *testing.T) {
+			p, c, q, at, now := observationFixture(t)
+			p.RequireCreditsOff = false
+			p.AccountOwnership = map[string]bool{c.ID: true}
+			h := observationHeaders(q)
+			h.Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.986")
+			h.Set("Anthropic-Ratelimit-Unified-Overage-Status", tc.status)
+			recordAdmissionSignals(c.ID, h, at, now)
+			rank, ok := rankAccount(p, c, "claude-opus-4", q, now, 0)
+			if ok != tc.eligible {
+				t.Fatalf("eligible=%v reason=%q, want eligible=%v", ok, rank.Reason, tc.eligible)
+			}
+			if !ok && rank.Reason != "Included five_hour next-request safety buffer" {
+				t.Fatalf("reason=%q", rank.Reason)
+			}
+		})
+	}
+}
+
+func TestNewerAvailableOverageSurvivesRetention(t *testing.T) {
+	p, c, q, at, _ := observationFixture(t)
+	p.RequireCreditsOff = false
+	p.AccountOwnership = map[string]bool{c.ID: true}
+	allowedAt := at
+	allowed := http.Header{}
+	allowed.Set("Anthropic-Ratelimit-Unified-Overage-Status", "allowed")
+	recordAdmissionSignals(c.ID, allowed, allowedAt, allowedAt)
+	now := allowedAt.Add((ledgerRetentionSeconds + 1) * time.Second)
+	h := observationHeaders(q)
+	h.Del("Anthropic-Ratelimit-Unified-Overage-Status")
+	h.Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.986")
+	before := now.Add(-2 * time.Second)
+	recordAdmissionSignals(c.ID, h, before, before)
+	beforeRank, beforeEligible := rankAccount(p, c, "opus", q, before, 0)
+	t.Logf("before_prune credits_may_apply=%v projected=%.3f eligible=%v reason=%q", providerCreditsMayApply(c, q), beforeRank.FiveHourProjected, beforeEligible, beforeRank.Reason)
+	recordAdmissionSignals(c.ID, h, now.Add(-time.Second), now)
+	admission.Lock()
+	admission.Path = "" // Verify that pruning also erased the durable billing observation.
+	admission.Unlock()
+	rank, eligible := rankAccount(p, c, "opus", q, now, 0)
+	t.Logf("endpoint_age=%.0fs newer_overage=allowed no_rejected_observation=true credits_may_apply=%v projected=%.3f eligible=%v", now.Sub(q.At).Seconds(), providerCreditsMayApply(c, q), rank.FiveHourProjected, eligible)
+	if eligible {
+		t.Error("want eligible=false: the newer allowed status must retain the next-request safety buffer until superseded")
+	}
+}
+
+func TestOutOfOrderSignalsDoNotReopenProtectedAccount(t *testing.T) {
+	p, c, q, endpointAt := admissionFixture(t)
+	p.RequireCreditsOff = true
+	off := false
+	q.ExtraUsage = &extraUsageStatus{Enabled: &off}
+	q.Groups[0].Buckets[0].Remaining = .23
+	oldStart := endpointAt.Add(5 * time.Second)
+	newStart := endpointAt.Add(90 * time.Second)
+	now := endpointAt.Add(100 * time.Second)
+	for i := 0; i < 3; i++ {
+		recordAdmissionCompletion(c.ID, fmt.Sprint(i), endpointAt.Add(30*time.Second))
+	}
+	low := quotaHeaders(.765, .3, q.Groups[0].Buckets[0].Reset, q.Groups[0].Buckets[1].Reset)
+	high := quotaHeaders(.759, .3, q.Groups[0].Buckets[0].Reset, q.Groups[0].Buckets[1].Reset)
+	recordAdmissionSignals(c.ID, low, oldStart, now)
+	lowerRank, lowerOK := rankAccount(p, c, "opus", q, now, 0)
+	admission.Lock()
+	saved := admission.Data.Signals[c.ID]
+	admission.Data.Signals[c.ID] = nil
+	admission.Unlock()
+	recordAdmissionSignals(c.ID, high, newStart, now)
+	higherRank, higherOK := rankAccount(p, c, "opus", q, now, 0)
+	admission.Lock()
+	admission.Data.Signals[c.ID] = saved
+	admission.Unlock()
+	recordAdmissionSignals(c.ID, high, newStart, now)
+	mergedRank, mergedOK := rankAccount(p, c, "opus", q, now, 0)
+	t.Logf("lower_only_projected=%.3f eligible=%v higher_only_projected=%.3f eligible=%v merged_projected=%.3f eligible=%v", lowerRank.FiveHourProjected, lowerOK, higherRank.FiveHourProjected, higherOK, mergedRank.FiveHourProjected, mergedOK)
+	if mergedOK {
+		t.Error("want eligible=false: merging two individually blocked observations must not reopen the protected account")
+	}
+}
+
+func TestLaterRejectedOverageKeepsStrictExclusion(t *testing.T) {
+	p, c, q, at, now := observationFixture(t)
+	h := observationHeaders(q)
+	h.Set("Anthropic-Ratelimit-Unified-Overage-Status", "allowed")
+	recordAdmissionSignals(c.ID, h, at.Add(-10*time.Second), now)
+	rank, ok := rankAccount(p, c, "opus", q, now, 0)
+	t.Logf("after allowed: eligible=%v reason=%q", ok, rank.Reason)
+	rej := http.Header{"Anthropic-Ratelimit-Unified-Overage-Status": {"rejected"}}
+	recordAdmissionSignals(c.ID, rej, at, now)
+	rank, ok = rankAccount(p, c, "opus", q, now, 0)
+	t.Logf("after rejected: eligible=%v reason=%q endpoint_at=%s allowed_at=%s rejected_at=%s",
+		ok, rank.Reason, q.At.Format("15:04:05"), at.Add(-10*time.Second).Format("15:04:05"), at.Format("15:04:05"))
+	if ok {
+		t.Error("want eligible=false: a non-rejected overage status newer than the endpoint reading still exists")
+	}
+}
+
+func TestLaterRejectedOverageKeepsBestEffortBuffer(t *testing.T) {
+	p, c, q, at, now := observationFixture(t)
+	p.RequireCreditsOff = false
+	p.AccountOwnership = map[string]bool{c.ID: true}
+	h := observationHeaders(q)
+	h.Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.986")
+	h.Set("Anthropic-Ratelimit-Unified-Overage-Status", "allowed")
+	recordAdmissionSignals(c.ID, h, at.Add(-10*time.Second), now)
+	rank, ok := rankAccount(p, c, "claude-opus-4", q, now, 0)
+	t.Logf("after allowed: eligible=%v reason=%q", ok, rank.Reason)
+	recordAdmissionSignals(c.ID, http.Header{"Anthropic-Ratelimit-Unified-Overage-Status": {"rejected"}}, at, now)
+	rank, ok = rankAccount(p, c, "claude-opus-4", q, now, 0)
+	t.Logf("after rejected: eligible=%v reason=%q", ok, rank.Reason)
+	if ok {
+		t.Error("want eligible=false (next-request safety buffer): a newer-than-endpoint allowed status was observed")
+	}
+}
+
+func TestNewerEndpointReadingSupersedesAvailableOverage(t *testing.T) {
+	p, c, q, at, now := observationFixture(t)
+	h := observationHeaders(q)
+	h.Set("Anthropic-Ratelimit-Unified-Overage-Status", "allowed")
+	recordAdmissionSignals(c.ID, h, at, now)
+	q.At = now.Add(-time.Second)
+	if rank, ok := rankAccount(p, c, "opus", q, now, 0); !ok {
+		t.Fatalf("newer disabled endpoint reading should supersede: %q", rank.Reason)
 	}
 }

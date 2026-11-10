@@ -139,7 +139,7 @@ func rankAccount(p policy, c candidate, model string, q snapshot, now time.Time,
 			return adaptiveRank{ID: c.ID, Reason: "Provider cooldown until " + retry.Format(time.RFC3339)}, false
 		}
 	}
-	if reason := creditSafetyReason(p, c, q, now); reason != "" {
+	if reason := creditSafetyReason(p, c, model, q, now); reason != "" {
 		return adaptiveRank{ID: c.ID, Remaining: 1, Owned: ownedAccount(p, c), Reason: reason}, false
 	}
 	return rankIncludedAccount(p, c, model, q, now, active)
@@ -213,7 +213,7 @@ func rankIncludedAccount(p policy, c candidate, model string, q snapshot, now ti
 				// With provider credits enabled (or unconfirmed), leave one
 				// estimated request unspent even on owned or unlocked accounts.
 				// This reduces spillover risk; it is not a billing guarantee.
-				if c.Provider == "claude" && !p.RequireCreditsOff && (q.ExtraUsage == nil || q.ExtraUsage.Enabled == nil || *q.ExtraUsage.Enabled) && projected <= math.Max(perRequest, rate/60)+1e-9 {
+				if c.Provider == "claude" && !p.RequireCreditsOff && providerCreditsMayApply(c, q) && projected <= math.Max(perRequest, rate/60)+1e-9 {
 					rank.Reason = "Included " + b.Window + " next-request safety buffer"
 					return rank, false
 				}

@@ -42,6 +42,9 @@ type quotaSignal struct {
 type billingSignal struct {
 	Status string    `json:"status"`
 	At     time.Time `json:"at"`
+	// Newest request start that reported a non-rejected status. A later
+	// rejected status cannot hide it: credits were available after then.
+	AvailableAt time.Time `json:"available_at,omitempty"`
 }
 type admissionData struct {
 	Completed map[string]completedDebit         `json:"completed"`
@@ -123,11 +126,20 @@ func pruneAdmission(now time.Time) {
 			delete(admission.Data.Signals, auth)
 		}
 	}
+	// Keep the newest available status: it is the only evidence that credits
+	// may apply after the endpoint reading, until a newer reading supersedes it.
 	for auth, s := range admission.Data.Billing {
-		if now.Sub(s.At) > ledgerRetentionSeconds*time.Second {
+		if s.availableAt().IsZero() && now.Sub(s.At) > ledgerRetentionSeconds*time.Second {
 			delete(admission.Data.Billing, auth)
 		}
 	}
+}
+
+func (b billingSignal) availableAt() time.Time {
+	if b.Status != "rejected" && b.At.After(b.AvailableAt) {
+		return b.At
+	}
+	return b.AvailableAt
 }
 
 func admissionSignalTime(at, now time.Time) (time.Time, bool) {
@@ -213,7 +225,9 @@ func recordAdmissionSignals(auth string, h http.Header, at, now time.Time) []quo
 	}
 	for _, s := range signals {
 		old, ok := admission.Data.Signals[auth][s.Window]
-		if !ok || s.Reset.After(old.Reset.Add(quotaResetJitterSeconds*time.Second)) || (sameQuotaWindow(s.Reset, old.Reset) && s.Remaining <= old.Remaining) {
+		// Completions arrive out of order. Within one window keep the lowest
+		// observed allowance, and the newer of two equal observations.
+		if !ok || s.Reset.After(old.Reset.Add(quotaResetJitterSeconds*time.Second)) || (sameQuotaWindow(s.Reset, old.Reset) && (s.Remaining < old.Remaining || s.Remaining == old.Remaining && s.At.After(old.At))) {
 			admission.Data.Signals[auth][s.Window] = s
 		}
 	}
@@ -221,9 +235,15 @@ func recordAdmissionSignals(auth string, h http.Header, at, now time.Time) []quo
 		if admission.Data.Billing == nil {
 			admission.Data.Billing = map[string]billingSignal{}
 		}
-		if old, ok := admission.Data.Billing[auth]; !ok || at.After(old.At) {
-			admission.Data.Billing[auth] = billingSignal{Status: status, At: at}
+		next := admission.Data.Billing[auth]
+		next.AvailableAt = next.availableAt()
+		if at.After(next.At) {
+			next.Status, next.At = status, at
 		}
+		if status != "rejected" && at.After(next.AvailableAt) {
+			next.AvailableAt = at
+		}
+		admission.Data.Billing[auth] = next
 	}
 	pruneAdmission(now)
 	persistAdmission()

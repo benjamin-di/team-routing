@@ -48,11 +48,11 @@ func loadCreditFences() {
 		creditFences.Broken = true
 	}
 }
-func creditSafetyReason(p policy, c candidate, q snapshot, now time.Time) string {
+func creditSafetyReason(p policy, c candidate, model string, q snapshot, now time.Time) string {
 	if c.Provider != "claude" {
 		return ""
 	}
-	billingReason := creditBillingReason(p, c, q, now)
+	billingReason := creditBillingReason(p, c, model, q, now)
 	creditFences.Lock()
 	loadCreditFences()
 	if creditFences.Broken {
@@ -69,7 +69,7 @@ func creditSafetyReason(p policy, c candidate, q snapshot, now time.Time) string
 		proof = paidFenceRecoveryWindow(q, detected)
 	}
 	if proof != "" {
-		_, eligible := rankIncludedAccount(p, c, "", q, now, 0)
+		_, eligible := rankIncludedAccount(p, c, model, q, now, 0)
 		if eligible {
 			next := copyCreditFences()
 			delete(next, c.ID)
@@ -88,12 +88,12 @@ func creditSafetyReason(p policy, c candidate, q snapshot, now time.Time) string
 	return "Paid usage was detected; waiting for usable included quota in a newer window"
 }
 
-func creditBillingReason(p policy, c candidate, q snapshot, now time.Time) string {
+func creditBillingReason(p policy, c candidate, model string, q snapshot, now time.Time) string {
 	maxAge := time.Duration(p.Poll+quotaAgeGraceSeconds) * time.Second
 	if q.At.IsZero() || q.At.After(now.Add(quotaResetJitterSeconds*time.Second)) {
 		return "A recent included quota and billing reading is required"
 	}
-	quotaFresh := now.Sub(quotaObservationTime(c, "", q, now)) <= maxAge
+	quotaFresh := now.Sub(quotaObservationTime(c, model, q, now)) <= maxAge
 	// Best-effort subscription mode relaxes only the provider billing toggle.
 	// Explicit paid requests and paid-use fences remain enforced.
 	if !p.RequireCreditsOff {
@@ -106,7 +106,7 @@ func creditBillingReason(p policy, c candidate, q snapshot, now time.Time) strin
 	loadAdmission()
 	billing := admission.Data.Billing[c.ID]
 	admission.Unlock()
-	if billing.At.After(q.At) && billing.Status != "rejected" {
+	if billing.availableAt().After(q.At) {
 		return "Extra usage is available at the provider; account is excluded"
 	}
 	if !quotaFresh {
@@ -122,6 +122,19 @@ func creditBillingReason(p policy, c candidate, q snapshot, now time.Time) strin
 		return "A recent included quota and billing reading is required"
 	}
 	return ""
+}
+
+// Credits may apply unless the endpoint reported them disabled and no newer
+// response reported a different overage status.
+func providerCreditsMayApply(c candidate, q snapshot) bool {
+	if q.ExtraUsage == nil || q.ExtraUsage.Enabled == nil || *q.ExtraUsage.Enabled {
+		return true
+	}
+	admission.Lock()
+	defer admission.Unlock()
+	loadAdmission()
+	billing := admission.Data.Billing[c.ID]
+	return admission.Broken || billing.availableAt().After(q.At)
 }
 
 // A newer reading alone is insufficient. Require evidence that an included

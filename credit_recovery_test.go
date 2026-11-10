@@ -180,7 +180,7 @@ func TestConcurrentRecoveryIsIdempotent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if reason := creditSafetyReason(p, c, q, now); reason != "" {
+			if reason := creditSafetyReason(p, c, "", q, now); reason != "" {
 				t.Error(reason)
 			}
 		}()
