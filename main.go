@@ -55,6 +55,7 @@ type snapshot struct {
 	RequestedAt       time.Time `json:"requested_at,omitempty"`
 	Groups            []group
 	Rates             map[string]float64 `json:"rates,omitempty"`
+	RequestCosts      map[string]float64 `json:"request_costs,omitempty"`
 	Equivalents       map[string]float64 `json:"five_hour_per_weekly,omitempty"`
 	DemandRate        float64            `json:"-"`
 	ExtraUsage        *extraUsageStatus  `json:"extra_usage,omitempty"`

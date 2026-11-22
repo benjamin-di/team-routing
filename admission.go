@@ -16,8 +16,9 @@ import (
 // Previously only active work was reserved, so a fast burst could repeatedly
 // spend the same cached allowance between provider polls.
 type completedDebit struct {
-	Auth string    `json:"auth"`
-	At   time.Time `json:"at"`
+	Auth  string    `json:"auth"`
+	Model string    `json:"model,omitempty"`
+	At    time.Time `json:"at"`
 }
 
 // A definite upstream rejection is not completed inference. Unknown/canceled
@@ -184,6 +185,9 @@ func completionIdentity(request, selection string) string {
 	return "request:" + request
 }
 func recordAdmissionCompletion(auth, request string, at time.Time) {
+	recordAdmissionCompletionForModel(auth, "", request, at)
+}
+func recordAdmissionCompletionForModel(auth, model, request string, at time.Time) {
 	if auth == "" || request == "" {
 		return
 	}
@@ -194,8 +198,14 @@ func recordAdmissionCompletion(auth, request string, at time.Time) {
 		return
 	}
 	key := digest(auth + "|" + request)
-	if prior, ok := admission.Data.Completed[key]; !ok || at.After(prior.At) {
-		admission.Data.Completed[key] = completedDebit{Auth: auth, At: at}
+	if prior, ok := admission.Data.Completed[key]; !ok || at.After(prior.At) || (prior.Model == "" && model != "") {
+		if model == "" && ok {
+			model = prior.Model
+		}
+		if ok && prior.At.After(at) {
+			at = prior.At
+		}
+		admission.Data.Completed[key] = completedDebit{Auth: auth, Model: model, At: at}
 	}
 	pruneAdmission(at)
 	persistAdmission()
@@ -301,6 +311,101 @@ func quotaObservationTime(p policy, c candidate, model string, q snapshot, now t
 	return at
 }
 
+func completionMatchesGroup(provider, model, groupName string) bool {
+	return model == "" || groupName == "" || relevantGroup(provider, model, groupName)
+}
+
+func countCompletedBetween(provider, auth, groupName string, from, to time.Time) int {
+	if auth == "" || from.IsZero() || !to.After(from) {
+		return 0
+	}
+	admission.Lock()
+	defer admission.Unlock()
+	loadAdmission()
+	if admission.Broken {
+		return 0
+	}
+	n := 0
+	for _, d := range admission.Data.Completed {
+		if d.Auth == auth && d.At.After(from) && !d.At.After(to) && completionMatchesGroup(provider, d.Model, groupName) {
+			n++
+		}
+	}
+	return n
+}
+
+// Learn per-request quota cost per window from paired polls within the same
+// window so high-RPM plans do not inherit Claude's fixed 0.5%/request estimate.
+func estimateRequestCosts(provider, auth string, old, next snapshot, now time.Time) map[string]float64 {
+	out := map[string]float64{}
+	if provider == "claude" {
+		return out
+	}
+	for k, v := range old.RequestCosts {
+		if v >= 1e-5 && v <= 0.05 {
+			out[k] = v
+		}
+	}
+	elapsed := now.Sub(old.At)
+	if auth == "" || old.At.IsZero() || elapsed < 30*time.Second || elapsed > ledgerRetentionSeconds*time.Second {
+		return out
+	}
+	previous := map[string]bucket{}
+	for _, g := range old.Groups {
+		for _, b := range g.Buckets {
+			previous[g.Name+"|"+b.Window] = b
+		}
+	}
+	for _, g := range next.Groups {
+		n := countCompletedBetween(provider, auth, g.Name, old.At, now)
+		if n < 5 {
+			continue
+		}
+		for _, b := range g.Buckets {
+			k := g.Name + "|" + b.Window
+			prior, ok := previous[k]
+			if !ok || !sameQuotaWindow(prior.Reset, b.Reset) || b.Remaining > prior.Remaining+1e-9 {
+				continue
+			}
+			delta := math.Max(0, prior.Remaining-b.Remaining)
+			if delta < 0.005 && n < 20 {
+				continue
+			}
+			defaultUnit := fiveRequestFraction
+			if weeklyWindow(b.Window) {
+				defaultUnit = weeklyRequestFraction
+			}
+			var observed float64
+			if delta > 1e-9 {
+				observed = delta / float64(n)
+			} else {
+				// Over >=20 requests with zero observable delta, bound cost below
+				// the smallest rounding step so bursts stop over-reserving.
+				observed = math.Min(defaultUnit, 0.005/float64(n))
+			}
+			observed = clamp(observed, 1e-5, 0.05)
+			if prev, ok := out[k]; ok {
+				observed = .5*prev + .5*observed
+			}
+			out[k] = observed
+		}
+	}
+	return out
+}
+
+func requestUnit(c candidate, q snapshot, groupName, window string) float64 {
+	unit := fiveRequestFraction
+	if weeklyWindow(window) {
+		unit = weeklyRequestFraction
+	}
+	if c.Provider != "claude" {
+		if learned := q.RequestCosts[groupName+"|"+window]; learned >= 1e-5 && learned <= 0.05 {
+			return learned
+		}
+	}
+	return unit
+}
+
 type admissionProjection struct {
 	Projected, CompletedReserve float64
 	CompletedCount              int
@@ -309,12 +414,9 @@ type admissionProjection struct {
 	Reason                      string
 }
 
-func projectAdmission(c candidate, q snapshot, b bucket, rate float64, active int, now time.Time, ignoreForecast bool) admissionProjection {
+func projectAdmission(c candidate, q snapshot, groupName string, b bucket, rate float64, active int, now time.Time, ignoreForecast bool) admissionProjection {
 	q.At = q.observationTime(c.Provider)
-	unit := fiveRequestFraction
-	if weeklyWindow(b.Window) {
-		unit = weeklyRequestFraction
-	}
+	unit := requestUnit(c, q, groupName, b.Window)
 	activeReserve := float64(active) * math.Max(unit, rate/60)
 	forecastRate := rate
 	if ignoreForecast {
@@ -333,7 +435,7 @@ func projectAdmission(c candidate, q snapshot, b bucket, rate float64, active in
 	countSince := func(cutoff time.Time) int {
 		n := 0
 		for _, d := range admission.Data.Completed {
-			if d.Auth == c.ID && d.At.After(cutoff.Add(-settlementLagSeconds*time.Second)) && !d.At.After(now.Add(quotaResetJitterSeconds*time.Second)) {
+			if d.Auth == c.ID && d.At.After(cutoff.Add(-settlementLagSeconds*time.Second)) && !d.At.After(now.Add(quotaResetJitterSeconds*time.Second)) && completionMatchesGroup(c.Provider, d.Model, groupName) {
 				n++
 			}
 		}

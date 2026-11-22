@@ -220,7 +220,7 @@ func observeUsage(raw []byte) (any, error) {
 	evidence.Unlock()
 	var signals []quotaSignal
 	if !u.Failed || input+output > 0 {
-		recordAdmissionCompletion(u.AuthID, completionIdentity(u.RequestID, u.SelectionID), now)
+		recordAdmissionCompletionForModel(u.AuthID, u.Model, completionIdentity(u.RequestID, u.SelectionID), now)
 	}
 	if u.Provider == "claude" {
 		signals = recordAdmissionSignals(u.AuthID, u.ResponseHeaders, start, now)

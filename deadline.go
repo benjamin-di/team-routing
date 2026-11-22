@@ -126,7 +126,7 @@ type deadlineWindow struct {
 // a budget already exceeds its available opportunities, compare raw pressure
 // too so a warm but less urgent conversation cannot strand that budget.
 func weeklyDeadlineRescue(best, held adaptiveRank, now time.Time) bool {
-	return best.Known && held.Known && best.WeeklyPressure > 1 &&
+	return !best.EstimatedDepleted && best.Known && held.Known && best.WeeklyPressure > 1 &&
 		best.WeeklyPressure-held.WeeklyPressure > weeklyRescuePressureDelta &&
 		best.WeeklyPressure > weeklyRescuePressureRatio*math.Max(.05, held.WeeklyPressure) &&
 		best.PacingDeadline.After(now) && best.PacingDeadline.Sub(now) <= weeklyRescueHours*time.Hour &&
@@ -196,11 +196,8 @@ func rankIncludedWithForecast(p policy, c candidate, model string, q snapshot, n
 				}
 				rank.Known = true
 				rate := q.Rates[g.Name+"|"+b.Window]
-				perRequest := fiveRequestFraction
-				if weeklyWindow(b.Window) {
-					perRequest = weeklyRequestFraction
-				}
-				projection := projectAdmission(c, q, b, rate, active, now, ignoreForecast)
+				perRequest := requestUnit(c, q, g.Name, b.Window)
+				projection := projectAdmission(c, q, g.Name, b, rate, active, now, ignoreForecast)
 				if projection.Reason != "" {
 					rank.Reason = projection.Reason
 					return rank, false
@@ -215,9 +212,19 @@ func rankIncludedWithForecast(p policy, c candidate, model string, q snapshot, n
 					rank.UnreconciledCompletions = projection.CompletedCount
 					rank.QuotaSignal = projection.Signal
 				}
+				floor := reserveForBucket(p, c, g.Name, b, now)
 				if projected <= 0 {
-					rank.Reason = "Projected " + b.Window + " quota exhausted"
-					return rank, false
+					if c.Provider != "claude" && floor == 0 && b.Remaining > 0 {
+						// Without per-response quota headers or a configured reserve,
+						// an estimated burst projection demotes the account below
+						// peers with positive projected headroom instead of rejecting
+						// positive provider-reported quota.
+						rank.EstimatedDepleted = true
+						projected = math.Min(b.Remaining, 1e-6)
+					} else {
+						rank.Reason = "Projected " + b.Window + " quota exhausted"
+						return rank, false
+					}
 				}
 				// With provider credits enabled (or unconfirmed), leave one
 				// estimated request unspent even on owned or unlocked accounts.
@@ -226,7 +233,6 @@ func rankIncludedWithForecast(p policy, c candidate, model string, q snapshot, n
 					rank.Reason = "Included " + b.Window + " next-request safety buffer"
 					return rank, false
 				}
-				floor := reserveForBucket(p, c, g.Name, b, now)
 				buffer := math.Max(perRequest, rate/60)
 				if floor > 0 {
 					if b.Window == "five_hour" {
@@ -330,7 +336,7 @@ func rankIncludedWithForecast(p policy, c candidate, model string, q snapshot, n
 	if rank.WeeklyReset.IsZero() {
 		rank.Reason = "Available included quota; no future weekly reset reported"
 	}
-	if hasFive && fiveEnd.After(now) {
+	if !rank.EstimatedDepleted && hasFive && fiveEnd.After(now) {
 		hours := fiveEnd.Sub(now).Hours()
 		waste := math.Max(0, availableNow-demand*hours)
 		rank.FiveHourWaste = waste

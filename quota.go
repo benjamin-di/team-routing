@@ -80,6 +80,10 @@ func (q *quotaCache) persist() {
 	}
 }
 func (q *quotaCache) get(identity string, ttl time.Duration, fetch func() (snapshot, error)) (snapshot, error) {
+	return q.getForAuth(identity, "", identity, ttl, fetch)
+}
+
+func (q *quotaCache) getForAuth(identity, provider, authID string, ttl time.Duration, fetch func() (snapshot, error)) (snapshot, error) {
 	for {
 		q.Lock()
 		q.load()
@@ -118,6 +122,7 @@ func (q *quotaCache) get(identity string, ttl time.Duration, fetch func() (snaps
 		if err == nil && len(result.Groups) > 0 {
 			result.LastFiveHourReset = rememberLastFiveHourReset(entry.Quota, result, now)
 			result.Rates = estimateRates(entry.Quota, result, now)
+			result.RequestCosts = estimateRequestCosts(provider, authID, entry.Quota, result, now)
 			result.Equivalents = estimateEquivalents(entry.Quota, result)
 			result.At = now
 			entry.Quota = result
@@ -270,7 +275,7 @@ func monitoredQuota(a quotaAccount) (snapshot, error) {
 	}
 	monitor.Aliases[a.ID] = identity
 	monitor.Unlock()
-	result, e := monitor.get(identity, ttl, func() (snapshot, error) { return fetchProviderQuota(a, providerQuotaHTTP) })
+	result, e := monitor.getForAuth(identity, a.Provider, a.ID, ttl, func() (snapshot, error) { return fetchProviderQuota(a, providerQuotaHTTP) })
 	result = normalizeQuotaSnapshot(a.Provider, result)
 	if !result.At.IsZero() {
 		state.Lock()

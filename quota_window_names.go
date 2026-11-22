@@ -35,6 +35,10 @@ func normalizeQuotaSnapshot(provider string, q snapshot) snapshot {
 	for key, value := range q.Rates {
 		rates[key] = value
 	}
+	costs := map[string]float64{}
+	for key, value := range q.RequestCosts {
+		costs[key] = value
+	}
 	for i, g := range q.Groups {
 		groups[i] = g
 		groups[i].Buckets = append([]bucket(nil), g.Buckets...)
@@ -47,9 +51,16 @@ func normalizeQuotaSnapshot(provider string, q snapshot) snapshot {
 					rates[next] = max(rates[next], rate)
 					delete(rates, old)
 				}
+				if cost, ok := costs[old]; ok {
+					costs[next] = max(costs[next], cost)
+					delete(costs, old)
+				}
 			}
 		}
 	}
 	q.Groups, q.Rates = groups, rates
+	if len(costs) > 0 {
+		q.RequestCosts = costs
+	}
 	return q
 }

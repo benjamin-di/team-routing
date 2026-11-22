@@ -104,7 +104,7 @@ func trackRequest(method string, raw []byte) (any, error) {
 			// Rejected client/auth/rate-limit requests do not establish quota use.
 			// Metered partial work is independently recorded by the usage callback.
 			if !definiteRejection(r.Outcome, r.StatusCode) {
-				recordAdmissionCompletion(prior.Auth, completionIdentity(r.RequestID, prior.Selection), completed)
+				recordAdmissionCompletionForModel(prior.Auth, r.Model, completionIdentity(r.RequestID, prior.Selection), completed)
 			}
 			traffic.Completed++
 			if traffic.Outcomes == nil {
@@ -163,6 +163,7 @@ type adaptiveRank struct {
 	Owned                                                               bool
 	BestEffort                                                          bool `json:",omitempty"`
 	Expiring                                                            bool
+	EstimatedDepleted                                                   bool `json:"estimated_depleted,omitempty"`
 	WeeklyPressure, WeeklyUnits, SpendableWeeklyUnits, Opportunities    float64
 	Ratio                                                               float64
 	RatioSource                                                         string
@@ -271,6 +272,9 @@ func sortAdaptiveRanks(ranks []adaptiveRank, byPriority bool) {
 		if byPriority && ranks[i].Priority != ranks[j].Priority {
 			return ranks[i].Priority > ranks[j].Priority
 		}
+		if ranks[i].EstimatedDepleted != ranks[j].EstimatedDepleted {
+			return !ranks[i].EstimatedDepleted
+		}
 		if math.Abs(ranks[i].Score-ranks[j].Score) > 1e-9 {
 			return ranks[i].Score > ranks[j].Score
 		}
@@ -318,7 +322,7 @@ func pickAdaptive(ranks []adaptiveRank, pk string, pin binding, exists bool, now
 			warmth := cacheWarmth(pk, pin.ID, now)
 			threshold := math.Max(ordinarySwitchAbsolute+(warmSwitchAbsolute-ordinarySwitchAbsolute)*warmth, (ordinarySwitchFraction+(warmSwitchFraction-ordinarySwitchFraction)*warmth)*math.Max(math.Abs(r.Score), .05))
 			switchThreshold = threshold
-			move := r.ActiveRequests > minimumActive || best.Known && r.Known && ((best.Expiring && !r.Expiring) || weeklyDeadlineRescue(best, r, now) || best.Score-r.Score > threshold)
+			move := r.ActiveRequests > minimumActive || (!best.EstimatedDepleted && r.EstimatedDepleted) || best.Known && r.Known && ((best.Expiring && !r.Expiring) || weeklyDeadlineRescue(best, r, now) || best.Score-r.Score > threshold)
 			if !move {
 				reason := "affinity_similar_urgency"
 				if warmth > 0 {
