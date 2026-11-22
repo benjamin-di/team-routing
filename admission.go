@@ -55,9 +55,10 @@ type admissionData struct {
 
 var admission = struct {
 	sync.Mutex
-	Path   string
-	Broken bool
-	Data   admissionData
+	Path       string
+	Broken     bool
+	Data       admissionData
+	Reconciled map[string]time.Time
 }{}
 
 func loadAdmission() {
@@ -71,6 +72,7 @@ func loadAdmission() {
 	}
 	admission.Path, admission.Broken = path, false
 	admission.Data = admissionData{Completed: map[string]completedDebit{}, Signals: map[string]map[string]quotaSignal{}}
+	admission.Reconciled = map[string]time.Time{}
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return
@@ -114,6 +116,10 @@ func persistAdmission() {
 func pruneAdmission(now time.Time) {
 	for id, d := range admission.Data.Completed {
 		if now.Sub(d.At) > ledgerRetentionSeconds*time.Second {
+			delete(admission.Data.Completed, id)
+			continue
+		}
+		if cut := admission.Reconciled[d.Auth]; !cut.IsZero() && !d.At.After(cut.Add(-settlementLagSeconds*time.Second)) {
 			delete(admission.Data.Completed, id)
 		}
 	}
@@ -184,6 +190,41 @@ func completionIdentity(request, selection string) string {
 	}
 	return "request:" + request
 }
+func reconcileAdmission(auth string, observedAt time.Time) {
+	if auth == "" || observedAt.IsZero() {
+		return
+	}
+	admission.Lock()
+	defer admission.Unlock()
+	loadAdmission()
+	if admission.Broken {
+		return
+	}
+	cutoff := observedAt
+	for _, s := range admission.Data.Signals[auth] {
+		if !s.At.IsZero() && s.Reset.After(observedAt) && s.At.Before(cutoff) {
+			cutoff = s.At
+		}
+	}
+	if admission.Reconciled == nil {
+		admission.Reconciled = map[string]time.Time{}
+	}
+	if cutoff.After(admission.Reconciled[auth]) {
+		admission.Reconciled[auth] = cutoff
+	}
+	limit := admission.Reconciled[auth].Add(-settlementLagSeconds * time.Second)
+	pruned := 0
+	for id, d := range admission.Data.Completed {
+		if d.Auth == auth && !d.At.After(limit) {
+			delete(admission.Data.Completed, id)
+			pruned++
+		}
+	}
+	if pruned > 0 {
+		persistAdmission()
+	}
+}
+
 func recordAdmissionCompletion(auth, request string, at time.Time) {
 	recordAdmissionCompletionForModel(auth, "", request, at)
 }

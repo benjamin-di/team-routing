@@ -281,6 +281,7 @@ func monitoredQuota(a quotaAccount) (snapshot, error) {
 		state.Lock()
 		state.Quota[a.ID] = result
 		state.Unlock()
+		reconcileAdmission(a.ID, result.observationTime(a.Provider))
 	}
 	return result, e
 }
