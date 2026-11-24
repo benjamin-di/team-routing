@@ -27,7 +27,7 @@ func assessPool(p policy, candidates []candidate, model string, now time.Time, c
 		q := state.Quota[c.ID]
 		q.DemandRate = demand
 		rank, ok := rankAccount(p, c, model, q, now, counts[c.ID])
-		rows[i] = poolEvidence(p, c, rank, ok, counts[c.ID])
+		rows[i] = poolEvidence(p, model, c, rank, ok, counts[c.ID])
 		anyEligible = anyEligible || ok
 	}
 	if !anyEligible {
@@ -35,15 +35,15 @@ func assessPool(p policy, candidates []candidate, model string, now time.Time, c
 			q := state.Quota[c.ID]
 			q.DemandRate = demand
 			if rank, ok := bestEffortRank(p, c, model, q, now, counts[c.ID]); ok {
-				rows[i] = poolEvidence(p, c, rank, true, counts[c.ID])
+				rows[i] = poolEvidence(p, model, c, rank, true, counts[c.ID])
 			}
 		}
 	}
 	return rows
 }
 
-func poolEvidence(p policy, c candidate, rank adaptiveRank, eligible bool, active int) rankEvidence {
-	rank.Priority = p.AccountPriority[c.ID]
+func poolEvidence(p policy, model string, c candidate, rank adaptiveRank, eligible bool, active int) rankEvidence {
+	rank.Priority = effectiveCandidatePriority(p, model, c)
 	rank.ActiveRequests = active
 	return rankEvidence{adaptiveRank: rank, Eligible: eligible}
 }

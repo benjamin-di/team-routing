@@ -431,3 +431,215 @@ func TestAccountPriorityThresholdMatchesReason(t *testing.T) {
 		t.Errorf("recorded reason %q comes from the no-priority pick but threshold %v does not (that pick used %v)", got.Reason, got.Threshold, base.Threshold)
 	}
 }
+
+func TestModelProviderPriorityOverridesGlobalOrderPerModel(t *testing.T) {
+	p, _, now := priorityFixture(t)
+	candidates := []candidate{
+		{ID: "claude-a", Provider: "claude"},
+		{ID: "codex-a", Provider: "codex"},
+		{ID: "ag-a", Provider: "antigravity"},
+	}
+	state.Quota = map[string]snapshot{
+		"claude-a": sample(now, .9, .9, time.Hour),
+		"codex-a":  sample(now, .9, .9, time.Hour),
+		"ag-a":     sample(now, .9, .9, time.Hour),
+	}
+	data := jsonObject(p)
+	data["account_priority"] = map[string]int{"claude-a": 0, "codex-a": -1, "ag-a": -2}
+	data["model_provider_priority"] = map[string]map[string]int{
+		"alias-value": {"codex": 0, "claude": -1, "antigravity": -2},
+	}
+	p = policyFromObject(t, data)
+
+	// Unmatched model keeps global account_priority (claude > codex > antigravity).
+	if got := choose(p, "", "alias-daily", nil, nil, candidates, now)["AuthID"]; got != "claude-a" {
+		t.Fatalf("alias-daily selected %v, want claude-a", got)
+	}
+	// Configured model uses model_provider_priority (codex > claude > antigravity).
+	if got := choose(p, "", "alias-value", nil, nil, candidates, now)["AuthID"]; got != "codex-a" {
+		t.Fatalf("alias-value selected %v, want codex-a", got)
+	}
+	// Exhausting codex falls back to claude (second tier), not antigravity.
+	state.Quota["codex-a"] = sample(now, 0, 0, time.Hour)
+	if got := choose(p, "", "alias-value", nil, nil, candidates, now)["AuthID"]; got != "claude-a" {
+		t.Fatalf("alias-value fallback selected %v, want claude-a", got)
+	}
+	// Exhausting claude too falls back to antigravity (third tier).
+	state.Quota["claude-a"] = sample(now, 0, 0, time.Hour)
+	if got := choose(p, "", "alias-value", nil, nil, candidates, now)["AuthID"]; got != "ag-a" {
+		t.Fatalf("alias-value third-tier fallback selected %v, want ag-a", got)
+	}
+}
+
+func TestModelProviderPriorityValidationAndSchema(t *testing.T) {
+	schema := policySchema()
+	props := schema["properties"].(map[string]any)
+	if _, ok := props["model_provider_priority"]; !ok {
+		t.Fatal("model_provider_priority missing from policySchema")
+	}
+	base := protectedPolicy()
+	if err := validatePolicy(base); err != nil {
+		t.Fatalf("base fixture must be valid: %v", err)
+	}
+	for name, val := range map[string]any{
+		"null root":         nil,
+		"null model map":    map[string]any{"m": nil},
+		"non-integer value": map[string]any{"m": map[string]any{"codex": 1.5}},
+		"out of range":      map[string]any{"m": map[string]any{"codex": 1000001}},
+		"empty model key":   map[string]any{"": map[string]any{"codex": 0}},
+		"padded model key":  map[string]any{" m ": map[string]any{"codex": 0}},
+		"nel model key":     map[string]any{"m\u0085": map[string]any{"codex": 0}},
+		"bom model key":     map[string]any{"m\ufeff": map[string]any{"codex": 0}},
+		"bad provider key":  map[string]any{"m": map[string]any{"bad provider": 0}},
+		"nel provider key":  map[string]any{"m": map[string]any{"codex\u0085": 0}},
+		"bom provider key":  map[string]any{"m": map[string]any{"codex\ufeff": 0}},
+		"long provider key": map[string]any{"m": map[string]any{strings.Repeat("a", 65): 0}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			obj := jsonObject(base)
+			obj["model_provider_priority"] = val
+			raw, err := json.Marshal(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var p policy
+			err = json.Unmarshal(raw, &p)
+			if err == nil {
+				err = validatePolicy(p)
+			}
+			if err == nil {
+				t.Fatalf("expected error for %s", name)
+			}
+			msg := strings.ToLower(err.Error())
+			if !strings.Contains(msg, "priority") && !strings.Contains(msg, "int") {
+				t.Fatalf("unexpected unrelated error for %s: %v", name, err)
+			}
+		})
+	}
+	// Valid empty object clears cleanly.
+	data := jsonObject(base)
+	data["model_provider_priority"] = map[string]map[string]int{}
+	_ = policyFromObject(t, data)
+}
+
+func TestModelProviderPriorityDashboardRoundTrip(t *testing.T) {
+	t.Chdir(t.TempDir())
+	applyConfig(nil)
+	state.Running = true
+	oldKeys, oldHost := fetchActiveClientKeys, hostCall
+	fetchActiveClientKeys = func(...managementCaller) ([]string, error) { return []string{"synthetic-client"}, nil }
+	hostCall = func(method string, _ any) (json.RawMessage, error) {
+		if method == "host.auth.list" {
+			return []byte(`{"files":[{"id":"a","provider":"claude"},{"id":"b","provider":"codex"}]}`), nil
+		}
+		return nil, fmt.Errorf("unexpected host call: %s", method)
+	}
+	t.Cleanup(func() { stopWorker(); applyConfig(nil); fetchActiveClientKeys = oldKeys; hostCall = oldHost })
+	p := defaultPolicy()
+	writePolicyFixture(t, p)
+	clients := localSecrets{Clients: []struct{ Name, Key string }{{"test", "synthetic-client"}}}
+	put := func(values map[string]any, status int) dashboardPolicy {
+		t.Helper()
+		raw, _ := json.Marshal(values)
+		response := handleDashboard(dashboardRequest{Method: "PUT", Path: dashboardAPI + "/policy", Body: raw})
+		if response.StatusCode != status {
+			t.Fatalf("save: got %d want %d: %s", response.StatusCode, status, response.Body)
+		}
+		var body struct {
+			Policy dashboardPolicy `json:"policy"`
+		}
+		if err := json.Unmarshal(response.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.Policy
+	}
+	want := map[string]any{"alias-value": map[string]any{"codex": float64(0), "claude": float64(-1)}}
+	input := jsonObject(publicPolicy(p, clients))
+	input["model_provider_priority"] = want
+	saved := put(input, 200)
+	got, err := readPolicy()
+	if err != nil || !reflect.DeepEqual(jsonObject(got)["model_provider_priority"], want) || !reflect.DeepEqual(jsonObject(saved)["model_provider_priority"], want) {
+		t.Fatal("model_provider_priority did not round-trip", err)
+	}
+	// Omitting field in an older client preserves existing rules.
+	input = jsonObject(saved)
+	delete(input, "model_provider_priority")
+	saved = put(input, 200)
+	if !reflect.DeepEqual(jsonObject(saved)["model_provider_priority"], want) {
+		t.Fatal("omitted model_provider_priority erased saved rules")
+	}
+	// Invalid payloads fail 400 without modifying disk.
+	for _, invalid := range []any{nil, map[string]any{"m": nil}, map[string]any{"m": map[string]any{"codex": 1.5}}, map[string]any{"m": map[string]any{"codex": 1000001}}} {
+		input = jsonObject(saved)
+		input["model_provider_priority"] = invalid
+		put(input, 400)
+		got, err = readPolicy()
+		if err != nil || !reflect.DeepEqual(jsonObject(got)["model_provider_priority"], want) {
+			t.Fatal("rejected save modified model_provider_priority", err)
+		}
+	}
+	// Explicit empty map clears rules.
+	input = jsonObject(saved)
+	input["model_provider_priority"] = map[string]any{}
+	saved = put(input, 200)
+	got, err = readPolicy()
+	if err != nil || jsonObject(got)["model_provider_priority"] != nil || jsonObject(saved)["model_provider_priority"] != nil {
+		t.Fatal("explicit empty map did not clear model_provider_priority", err)
+	}
+}
+
+func TestEvaluateRouteExposesExplicitZeroModelProviderPriority(t *testing.T) {
+	t.Chdir(t.TempDir())
+	applyConfig(nil)
+	oldHost, oldModels := hostCall, fetchHostModelInventory
+	now := time.Now()
+	state.Lock()
+	state.Quota = map[string]snapshot{
+		"a": sample(now, .9, .9, time.Hour),
+		"b": sample(now, .9, .9, time.Hour),
+	}
+	state.Unlock()
+	hostCall = func(method string, _ any) (json.RawMessage, error) {
+		if method == "host.auth.list" {
+			return []byte(`{"files":[{"id":"a","name":"a.json","provider":"claude"},{"id":"b","name":"b.json","provider":"codex"},{"id":"c","name":"c.json","provider":"claude","disabled":true}]}`), nil
+		}
+		return nil, fmt.Errorf("unexpected host call: %s", method)
+	}
+	fetchHostModelInventory = func() ([]hostCredentialModels, error) {
+		return []hostCredentialModels{
+			{ID: "a", Provider: "claude", Models: []string{"alias-value"}},
+			{ID: "b", Provider: "codex", Models: []string{"alias-value"}},
+			{ID: "c", Provider: "claude", Models: []string{"alias-value"}},
+		}, nil
+	}
+	t.Cleanup(func() { applyConfig(nil); hostCall = oldHost; fetchHostModelInventory = oldModels })
+	p := protectedPolicy()
+	data := jsonObject(p)
+	data["account_priority"] = map[string]int{"a": 10, "b": -1, "c": 10}
+	data["model_provider_priority"] = map[string]map[string]int{"alias-value": {"claude": 0, "codex": 5}}
+	writePolicyFixture(t, policyFromObject(t, data))
+
+	raw, _ := json.Marshal(routeEvaluationInput{Model: "alias-value"})
+	resp := handleDashboard(dashboardRequest{Method: "POST", Path: dashboardAPI + "/evaluate", Body: raw})
+	if resp.StatusCode != 200 {
+		t.Fatalf("evaluate failed: %d %s", resp.StatusCode, resp.Body)
+	}
+	var out struct {
+		Candidates []map[string]any `json:"candidates"`
+	}
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]float64{}
+	for _, row := range out.Candidates {
+		id, _ := row["account_id"].(string)
+		prio, ok := row["priority"].(float64)
+		if !ok {
+			t.Fatalf("candidate %s missing explicit priority field: %v", id, row)
+		}
+		seen[id] = prio
+	}
+	if seen["a"] != 0 || seen["b"] != 5 || seen["c"] != 0 {
+		t.Fatalf("unexpected evaluated priorities: %v", seen)
+	}
+}

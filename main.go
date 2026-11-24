@@ -20,9 +20,10 @@ type target struct {
 type policy struct {
 	Owned            []string                            `json:"owned_emails"`
 	Routes           map[string]target                   `json:"routes"`
-	ClientLabels     map[string]string                   `json:"client_labels,omitempty"`
-	AccountPriority  accountPriorities                   `json:"account_priority,omitempty"`
-	AccountReserves  map[string]accountReserve           `json:"account_reserves,omitempty"`
+	ClientLabels          map[string]string                   `json:"client_labels,omitempty"`
+	AccountPriority       accountPriorities                   `json:"account_priority,omitempty"`
+	ModelProviderPriority modelProviderPriorities             `json:"model_provider_priority,omitempty"`
+	AccountReserves       map[string]accountReserve           `json:"account_reserves,omitempty"`
 	ModelRoutes      map[string]map[string]modelRule     `json:"model_routes,omitempty"`
 	AccountOwnership map[string]bool                     `json:"account_ownership,omitempty"`
 	ProviderReserves map[string]*sharedClaudePolicy      `json:"provider_reserves,omitempty"`

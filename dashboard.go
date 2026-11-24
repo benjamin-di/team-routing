@@ -50,9 +50,10 @@ type dashboardPolicy struct {
 	Revision          string                              `json:"revision"`
 	Owned             []string                            `json:"owned_emails"`
 	Routes            map[string]target                   `json:"routes"`
-	ClientLabels      map[string]string                   `json:"client_labels,omitempty"`
-	AccountPriority   accountPriorities                   `json:"account_priority,omitempty"`
-	AccountReserves   map[string]accountReserve           `json:"account_reserves,omitempty"`
+	ClientLabels          map[string]string                   `json:"client_labels,omitempty"`
+	AccountPriority       accountPriorities                   `json:"account_priority,omitempty"`
+	ModelProviderPriority modelProviderPriorities             `json:"model_provider_priority,omitempty"`
+	AccountReserves       map[string]accountReserve           `json:"account_reserves,omitempty"`
 	ModelRoutes       map[string]map[string]modelRule     `json:"model_routes,omitempty"`
 	AccountOwnership  map[string]bool                     `json:"account_ownership,omitempty"`
 	ProviderReserves  map[string]*sharedClaudePolicy      `json:"provider_reserves,omitempty"`
@@ -87,7 +88,7 @@ func (p *dashboardPolicy) UnmarshalJSON(raw []byte) error {
 	for field := range fields {
 		p.EditedFields[field] = true
 	}
-	for _, name := range []string{"account_reserves", "model_routes", "account_ownership", "provider_reserves", "window_reserves"} {
+	for _, name := range []string{"account_reserves", "model_routes", "account_ownership", "provider_reserves", "window_reserves", "model_provider_priority"} {
 		if raw, ok := fields[name]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return fmt.Errorf("%s must be an object; use {} to remove rules", name)
 		}
@@ -213,6 +214,7 @@ func publicPolicy(p policy, s localSecrets) dashboardPolicy {
 	out.WeeklyRatio = p.WeeklyRatio
 	out.RequireCreditsOff = p.RequireCreditsOff
 	out.AccountPriority = cloneAccountPriority(p.AccountPriority)
+	out.ModelProviderPriority = cloneModelProviderPriority(p.ModelProviderPriority)
 	out.AccountReserves = cloneAccountReserves(p.AccountReserves)
 	out.AccountOwnership = cloneOwnership(p.AccountOwnership)
 	out.ProviderReserves = cloneProviderReserves(p.ProviderReserves)
@@ -541,6 +543,10 @@ func saveDashboard(input dashboardPolicy, callers ...managementCaller) (dashboar
 	next.AccountPriority = input.AccountPriority
 	if input.AccountPriority == nil && !input.EditedFields["account_priority"] {
 		next.AccountPriority = cloneAccountPriority(current.AccountPriority)
+	}
+	next.ModelProviderPriority = input.ModelProviderPriority
+	if input.ModelProviderPriority == nil && !input.EditedFields["model_provider_priority"] {
+		next.ModelProviderPriority = cloneModelProviderPriority(current.ModelProviderPriority)
 	}
 	next.AccountReserves = input.AccountReserves
 	if input.AccountReserves == nil && !input.EditedFields["account_reserves"] {

@@ -84,11 +84,11 @@ func evaluateRoute(input routeEvaluationInput, caller managementCaller) (any, er
 			rowIndices = append(rowIndices, len(rows))
 		}
 		rank := adaptiveRank{ID: c.ID, Reason: "Disabled in proxy"}
-		rows = append(rows, map[string]any{"account_id": entry.ID, "label": label, "provider": entry.Provider, "eligible": false, "best_effort": false, "reason": rank.Reason, "assessment": rank, "reserves": effectiveAccountReserve(p, c), "native_model_cooldown_check": "deferred_to_host", "native_account_unavailable": f.Unavailable})
+		rows = append(rows, map[string]any{"account_id": entry.ID, "label": label, "provider": entry.Provider, "eligible": false, "best_effort": false, "reason": rank.Reason, "assessment": rank, "priority": effectiveCandidatePriority(p, input.Model, c), "reserves": effectiveAccountReserve(p, c), "native_model_cooldown_check": "deferred_to_host", "native_account_unavailable": f.Unavailable})
 	}
 	for i, result := range assessPool(p, candidates, input.Model, now, counts, 0) {
 		row := rows[rowIndices[i]]
-		row["eligible"], row["best_effort"], row["reason"], row["assessment"] = result.Eligible, result.BestEffort, result.Reason, result.adaptiveRank
+		row["eligible"], row["best_effort"], row["reason"], row["assessment"], row["priority"] = result.Eligible, result.BestEffort, result.Reason, result.adaptiveRank, result.Priority
 		if result.Eligible {
 			eligible++
 		}
